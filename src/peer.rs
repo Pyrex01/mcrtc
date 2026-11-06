@@ -182,6 +182,25 @@ impl Peer {
             .with_context(|| format!("could not create data channel {label}"))
     }
 
+    /// Like [`Peer::create_negotiated_channel`], but for a flow of datagrams: nothing is resent
+    /// and nothing waits for what came before.
+    pub async fn create_datagram_channel(
+        &self,
+        label: &str,
+        stream_id: u16,
+    ) -> Result<Arc<dyn DataChannel>> {
+        let options = RTCDataChannelInit {
+            ordered: false,
+            max_retransmits: Some(0),
+            negotiated: Some(stream_id),
+            ..Default::default()
+        };
+        self.pc
+            .create_data_channel(label, Some(options))
+            .await
+            .with_context(|| format!("could not create data channel {label}"))
+    }
+
     /// Creates the offer and returns its SDP once gathering finished, candidates included.
     pub async fn create_offer(&self) -> Result<String> {
         let offer = self

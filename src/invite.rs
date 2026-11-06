@@ -15,6 +15,8 @@ use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
 
+use crate::edition::Edition;
+
 pub const PREFIX: &str = "mcrtc1:";
 pub const VERSION: u32 = 1;
 pub const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
@@ -46,6 +48,9 @@ pub struct Payload {
     pub kind: PayloadType,
     pub sdp: String,
     pub expires: u64,
+    /// Left out for Java, so those strings stay as short as they always were.
+    #[serde(default, skip_serializing_if = "Edition::is_java")]
+    pub edition: Edition,
 }
 
 pub fn unix_now() -> u64 {
@@ -56,12 +61,13 @@ pub fn unix_now() -> u64 {
 }
 
 impl Payload {
-    pub fn new(kind: PayloadType, sdp: String, ttl: Duration) -> Self {
+    pub fn new(kind: PayloadType, sdp: String, ttl: Duration, edition: Edition) -> Self {
         Self {
             v: VERSION,
             kind,
             sdp,
             expires: unix_now() + ttl.as_secs(),
+            edition,
         }
     }
 
@@ -142,6 +148,22 @@ impl Payload {
         Ok(())
     }
 
+    /// A Java game cannot use a Bedrock tunnel or the other way around, so say so up front
+    /// instead of leaving Minecraft to time out.
+    pub fn check_edition(&self, expected: Edition) -> Result<()> {
+        ensure!(
+            self.edition == expected,
+            "this {} is for {} but mcrtc is set to {}. Choose {} on the title screen, or use \
+             --edition {}",
+            self.kind.noun(),
+            self.edition.name(),
+            expected.name(),
+            self.edition.name(),
+            self.edition.flag()
+        );
+        Ok(())
+    }
+
     /// Decodes and validates a pasted string against the current time.
     pub fn parse(input: &str, expected: PayloadType) -> Result<Self> {
         let payload = Self::decode(input)?;
@@ -185,6 +207,7 @@ mod tests {
             kind,
             sdp: "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\na=fingerprint:sha-256 AB:CD\r\n".repeat(20),
             expires: 2_000,
+            edition: Edition::Java,
         }
     }
 
@@ -225,6 +248,30 @@ mod tests {
     }
 
     #[test]
+    fn java_strings_look_like_they_always_did() {
+        let json = sample(PayloadType::Offer).encode_raw_json().unwrap();
+        assert!(!json.contains("edition"), "{json}");
+        let decoded = Payload::decode(&json).unwrap();
+        assert_eq!(decoded.edition, Edition::Java);
+    }
+
+    #[test]
+    fn the_edition_survives_the_trip_and_a_mismatch_says_what_to_do() {
+        let payload = Payload {
+            edition: Edition::Bedrock,
+            ..sample(PayloadType::Offer)
+        };
+        let decoded = Payload::decode(&payload.encode().unwrap()).unwrap();
+        assert_eq!(decoded, payload);
+        decoded.check_edition(Edition::Bedrock).unwrap();
+
+        let error = decoded.check_edition(Edition::Java).unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("invite is for Bedrock Edition"), "{error}");
+        assert!(error.contains("--edition bedrock"), "{error}");
+    }
+
+    #[test]
     fn whitespace_from_chat_apps_is_ignored() {
         let payload = sample(PayloadType::Offer);
         let encoded = payload.encode().unwrap();
@@ -251,7 +298,7 @@ mod tests {
 
     #[test]
     fn new_payload_expires_after_the_ttl() {
-        let payload = Payload::new(PayloadType::Offer, "v=0".into(), DEFAULT_TTL);
+        let payload = Payload::new(PayloadType::Offer, "v=0".into(), DEFAULT_TTL, Edition::Java);
         let now = unix_now();
         payload.validate(PayloadType::Offer, now).unwrap();
         assert!(payload.validate(PayloadType::Offer, now + 601).is_err());

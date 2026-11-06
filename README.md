@@ -1,13 +1,18 @@
 # mcrtc
 
-Let friends join your locally hosted, unmodified Minecraft Java server without port forwarding or
-a VPN. mcrtc tunnels Minecraft's TCP traffic over encrypted WebRTC data channels. There is no
-signaling server: you and your friend exchange one short string each over Discord, WhatsApp or
-anything else.
+Let friends join your locally hosted, unmodified Minecraft server, Java or Bedrock, without port
+forwarding or a VPN. mcrtc tunnels Minecraft's traffic over encrypted WebRTC data channels. There
+is no signaling server: you and your friend exchange one short string each over Discord, WhatsApp
+or anything else.
 
 ```
 Friend's MC client -> 127.0.0.1:25565 -> [mcrtc join] ~~WebRTC~~ [mcrtc host] -> 127.0.0.1:25565 -> MC server
 ```
+
+Bedrock uses port 19132 in place of 25565, and mcrtc carries both TCP and UDP on it: NetherNet
+servers signal over TCP, and RakNet servers use UDP. Whether this gets a player into a current
+server is not proven yet: see [Limitations](#limitations). Both ends need mcrtc, so a friend needs
+a PC to run it on; consoles cannot run it.
 
 ![Title screen](docs/title-screen.png)
 
@@ -19,6 +24,9 @@ Friend's MC client -> 127.0.0.1:25565 -> [mcrtc join] ~~WebRTC~~ [mcrtc host] ->
 Run `mcrtc` with no arguments, or double-click it. A native window opens, drawn like Minecraft's
 own menus, with the same automatic GUI scale. Keep it open while you play: closing it ends the
 session.
+
+Pick **Java Edition** or **Bedrock Edition** on the title screen first. You and your friend must
+pick the same one; an invite for the other edition is refused and says which to choose.
 
 **Host**
 
@@ -84,8 +92,13 @@ Connected! Point Minecraft at 127.0.0.1:25565.
 
 Then, in Minecraft: Multiplayer, Add Server, `127.0.0.1:25565`.
 
-**Testing on one machine:** the server and `mcrtc join` cannot both use port 25565 there, so give
-the joiner another port with `mcrtc join --listen 127.0.0.1:25566`.
+**Bedrock:** add `--edition bedrock` on both sides. The friend needs the port free on both TCP and
+UDP. In Minecraft: Play, Servers, Add Server, with
+address `127.0.0.1` and port `19132`.
+
+**Testing on one machine:** the server and `mcrtc join` cannot both use the same port there, so
+give the joiner another one with `mcrtc join --listen 127.0.0.1:25566`, or `127.0.0.1:19134` for
+Bedrock.
 
 ## Options
 
@@ -96,13 +109,17 @@ mcrtc host [--server 127.0.0.1:25565] [--whitelist-file ids.txt]
            [--max-peers N] [--max-connections N]
 mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem]
 
-Common: --config mcrtc.toml, --stun <url> (repeatable),
+Common: --edition java|bedrock, --config mcrtc.toml, --stun <url> (repeatable),
         --turn <url> --turn-user <u> --turn-pass <p>, --raw-json, -v
 ```
 
 `--raw-json` prints plain JSON instead of the `mcrtc1:` string. Either form is accepted when
 pasting; end a JSON paste with a blank line. See [mcrtc.example.toml](mcrtc.example.toml) for the
 config file. Flags win over the file.
+
+`--server` and `--listen` default to port 25565 for Java and 19132 for Bedrock. In the interface,
+`server` and `listen` from a config file belong to the edition it starts on, which is the file's
+`edition` or `--edition`; the other edition uses its default.
 
 The default STUN servers are `stun:stun.l.google.com:19302` and `stun:stun.cloudflare.com:3478`.
 
@@ -126,9 +143,16 @@ file and start it with `mcrtc ui --config mcrtc.toml`.
 3. The host pastes the reply and the two sides connect, directly when possible.
 4. Each TCP connection Minecraft makes to the friend's mcrtc gets its own reliable, ordered data
    channel, and the host opens a matching connection to the server.
+5. For Bedrock, the friend's mcrtc also listens on UDP on the same port. A NetherNet server only
+   has its HTTP signaling carried, over TCP as above, and the game's own WebRTC then connects to
+   the server directly, outside the tunnel. For RakNet, each client address gets its own unordered
+   data channel without retransmits, and the host gives it its own UDP socket to the server. RakNet
+   handles loss and ordering itself, so resending here would only add lag. A flow ends after 30
+   quiet seconds, and the friend's side allows 64 at once.
 
 An invite is `{ "v": 1, "type": "offer"|"answer", "sdp": "...", "expires": <unix_ts> }`, deflated,
 base64url encoded without padding, and prefixed with `mcrtc1:`. They expire after 10 minutes.
+Bedrock strings add `"edition": "bedrock"`.
 
 Traffic is encrypted with DTLS, and peers are verified by the certificate fingerprints in the
 SDP. Reads are chunked to 16 KiB. A sender pauses above 1 MiB of unacknowledged data and resumes
@@ -162,6 +186,9 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
 - **Half-close is not preserved.** TCP EOF tears the connection down once queued data is delivered.
   Minecraft never half-closes.
 - **Invites leave out RTCP candidates, repeats and wildcards**, so they stay short enough to paste.
+- **Bedrock status pongs are rewritten on the friend's side.** A server's pong advertises its own
+  port and the game can connect to that instead of the one it pinged, which would miss the tunnel.
+  The friend's mcrtc replaces it with the port it listens on.
 
 ## Limitations
 
@@ -170,6 +197,14 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
   as usual.
 - A connection stuck for up to 30 seconds can delay that friend's other connections.
 - mcrtc does not reconnect. If a connection drops, make a new invite.
+- **Bedrock has not been tested with the game itself, and NetherNet may not get through.** A
+  1.26.62 dedicated server defaults to `transport=nethernet`. mcrtc carries its HTTP signaling,
+  but gameplay is the game's own WebRTC connecting straight to the server, so that connection
+  still has to cross both routers without mcrtc's help. `online-mode=false` turns the signaling
+  port off, and `transport=raknet` logs that players cannot connect. A scripted RakNet handshake
+  does get accepted by that server through the tunnel.
+- Consoles cannot run mcrtc. Phones and tablets cannot either, so they would need it running on a
+  PC on the same network, with `--listen` set to an address they can reach.
 
 ## TURN setup
 
@@ -200,6 +235,8 @@ The log line `connected via ... (relayed through TURN)` confirms it is in use.
 |---|---|
 | `Connection failed. Probably strict NAT.` | Configure TURN on both sides, see above. |
 | `could not listen on 127.0.0.1:25565` | The server or another program has the port. Use `--listen 127.0.0.1:25566`. |
+| `this invite is for Bedrock Edition` | You and the host picked different editions. Pick the one it names. |
+| Bedrock on Windows cannot see `127.0.0.1` | Older Store versions block loopback. Run `CheckNetIsolation LoopbackExempt -a -n="Microsoft.MinecraftUWP_8wekyb3d8bbwe"` as administrator. |
 | Friend connects but Minecraft cannot reach the server | Check that the server is running and that `--server` matches its port. The host logs `could not reach the Minecraft server`. |
 | `this invite expired` | Make a new invite. They last 10 minutes. |
 | `the string is corrupted or was cut off` | Copy it again. Some chat apps cut long messages, so try sending it as a file, or use the interface. |

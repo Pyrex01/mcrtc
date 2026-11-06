@@ -1,11 +1,11 @@
-//! Host mode: the invite loop, per-friend supervision and dialing the Minecraft server.
+//! Host mode: the invite loop, per-friend supervision and reaching the Minecraft server.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout, Instant};
@@ -14,7 +14,9 @@ use webrtc::data_channel::DataChannel;
 
 use crate::bridge::{bridge, Counter, Slot};
 use crate::console::Console;
-use crate::control::{self, channel_label, stream_id, ControlEnd, Role};
+use crate::control::{self, channel_label, stream_id, ControlEnd, Role, Transport};
+use crate::datagram::{self, relay, Endpoint};
+use crate::edition::Edition;
 use crate::events::{Event, Reporter};
 use crate::invite::{sdp_fingerprints, Payload, PayloadType, DEFAULT_TTL};
 use crate::peer::{ChannelHandler, Peer, PeerOptions};
@@ -25,6 +27,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct HostOptions {
     pub peer: PeerOptions,
+    pub edition: Edition,
     pub server: String,
     pub max_peers: Option<usize>,
     pub max_connections: Option<usize>,
@@ -38,54 +41,92 @@ pub struct HostOptions {
 pub struct Tunnel {
     pub peer: Peer,
     pub control: Arc<dyn DataChannel>,
+    pub edition: Edition,
     pub server: String,
     pub max_connections: Option<usize>,
     pub label: String,
     pub connections: Counter,
 }
 
+/// This side's connection to the Minecraft server.
+enum Server {
+    Tcp(TcpStream),
+    Udp(UdpSocket),
+}
+
 impl Tunnel {
     pub fn role(self) -> Role {
-        Role::Host(Arc::new(move |id| {
-            tokio::spawn(self.clone().serve(id));
+        Role::Host(Arc::new(move |id, transport| {
+            tokio::spawn(self.clone().serve(id, transport));
         }))
     }
 
-    async fn serve(self, id: u64) {
+    async fn serve(self, id: u64, transport: Transport) {
         let channel_name = channel_label(id);
+        if transport == Transport::Datagrams && self.edition == Edition::Java {
+            warn!(peer = %self.label, "refusing {channel_name}, Java has no datagrams");
+            control::answer_open(self.control.as_ref(), id, false).await;
+            return;
+        }
         let Some(_slot) = self.connections.try_acquire(self.max_connections) else {
             warn!(peer = %self.label, "connection limit reached, refusing {channel_name}");
             control::answer_open(self.control.as_ref(), id, false).await;
             return;
         };
-        let Some((stream, channel)) = self.open(&channel_name, id).await else {
+        let Some((server, channel)) = self.open(&channel_name, id, transport).await else {
             control::answer_open(self.control.as_ref(), id, false).await;
             return;
         };
         control::answer_open(self.control.as_ref(), id, true).await;
         debug!(peer = %self.label, channel = %channel_name, "connection opened");
-        bridge(stream, channel).await;
+        match server {
+            Server::Tcp(stream) => bridge(stream, channel).await,
+            Server::Udp(socket) => relay(Endpoint::server(socket), channel).await,
+        }
         debug!(peer = %self.label, channel = %channel_name, "connection closed");
     }
 
-    async fn open(&self, label: &str, id: u64) -> Option<(TcpStream, Arc<dyn DataChannel>)> {
-        let stream = match timeout(DIAL_TIMEOUT, TcpStream::connect(&self.server)).await {
-            Ok(Ok(stream)) => stream,
+    async fn dial(&self, transport: Transport) -> Option<Server> {
+        let dial = async {
+            match transport {
+                Transport::Stream => TcpStream::connect(&self.server).await.map(Server::Tcp),
+                Transport::Datagrams => datagram::dial(&self.server).await.map(Server::Udp),
+            }
+        };
+        match timeout(DIAL_TIMEOUT, dial).await {
+            Ok(Ok(server)) => Some(server),
             Ok(Err(error)) => {
                 warn!(server = %self.server, %error, "could not reach the Minecraft server");
-                return None;
+                None
             }
             Err(_) => {
                 warn!(server = %self.server, "timed out dialing the Minecraft server");
-                return None;
+                None
+            }
+        }
+    }
+
+    async fn open(
+        &self,
+        label: &str,
+        id: u64,
+        transport: Transport,
+    ) -> Option<(Server, Arc<dyn DataChannel>)> {
+        let server = self.dial(transport).await?;
+        let channel = match server {
+            Server::Tcp(_) => {
+                self.peer
+                    .create_negotiated_channel(label, stream_id(id))
+                    .await
+            }
+            Server::Udp(_) => {
+                self.peer
+                    .create_datagram_channel(label, stream_id(id))
+                    .await
             }
         };
-        match self
-            .peer
-            .create_negotiated_channel(label, stream_id(id))
-            .await
-        {
-            Ok(channel) => Some((stream, channel)),
+        match channel {
+            Ok(channel) => Some((server, channel)),
             Err(error) => {
                 warn!(peer = %self.label, "{error:#}");
                 None
@@ -286,7 +327,7 @@ async fn invite(
 
         reporter.report(Event::Gathering);
         let sdp = peer.create_offer().await?;
-        let payload = Payload::new(PayloadType::Offer, sdp, DEFAULT_TTL);
+        let payload = Payload::new(PayloadType::Offer, sdp, DEFAULT_TTL, options.edition);
         let invite = if options.raw_json {
             payload.encode_raw_json()?
         } else {
@@ -318,6 +359,7 @@ async fn invite(
             let tunnel = Tunnel {
                 peer,
                 control,
+                edition: options.edition,
                 server: options.server.clone(),
                 max_connections: options.max_connections,
                 label,
@@ -366,6 +408,7 @@ async fn read_reply(options: &HostOptions, console: &mut Console, label: &str) -
             return Reply::Cancelled;
         }
         let checked = Payload::parse(&paste, PayloadType::Answer).and_then(|payload| {
+            payload.check_edition(options.edition)?;
             if let Some(whitelist) = &options.whitelist {
                 check_whitelist(whitelist, &payload.sdp)?;
             }

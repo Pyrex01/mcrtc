@@ -22,6 +22,7 @@ const PING: &str = "ping";
 const PONG: &str = "pong";
 const BYE: &str = "bye";
 const OPEN: &str = "open";
+const OPEN_DATAGRAMS: &str = "open-datagrams";
 const READY: &str = "ready";
 const REFUSED: &str = "refused";
 
@@ -48,8 +49,24 @@ pub fn channel_label(id: u64) -> String {
     format!("mc-{id}")
 }
 
+/// What a tunnel connection carries, which decides how the host reaches the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    Stream,
+    Datagrams,
+}
+
+impl Transport {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Stream => OPEN,
+            Self::Datagrams => OPEN_DATAGRAMS,
+        }
+    }
+}
+
 /// Called on the host for each `open`. Must not block.
-pub type OpenHandler = Arc<dyn Fn(u64) + Send + Sync>;
+pub type OpenHandler = Arc<dyn Fn(u64, Transport) + Send + Sync>;
 
 /// The joiner's open requests still waiting for an answer.
 #[derive(Clone, Default)]
@@ -64,11 +81,12 @@ impl PendingOpens {
     }
 
     /// Asks the host to open its end of tunnel connection `id`. False means no.
-    pub async fn request(&self, control: &dyn DataChannel, id: u64) -> bool {
+    pub async fn request(&self, control: &dyn DataChannel, id: u64, transport: Transport) -> bool {
         let (tx, rx) = oneshot::channel();
         self.0.lock().expect("pending opens lock").insert(id, tx);
         let accepted = async {
-            control.send_text(&format!("{OPEN} {id}")).await.ok()?;
+            let word = transport.word();
+            control.send_text(&format!("{word} {id}")).await.ok()?;
             rx.await.ok()
         };
         let answer = timeout(OPEN_TIMEOUT, accepted).await.ok().flatten();
@@ -110,7 +128,8 @@ impl Role {
         };
         let Ok(id) = id.parse() else { return };
         match (self, word) {
-            (Role::Host(on_open), OPEN) => on_open(id),
+            (Role::Host(on_open), OPEN) => on_open(id, Transport::Stream),
+            (Role::Host(on_open), OPEN_DATAGRAMS) => on_open(id, Transport::Datagrams),
             (Role::Joiner(pending), READY) => pending.resolve(id, true),
             (Role::Joiner(pending), REFUSED) => pending.resolve(id, false),
             _ => debug!(word, "ignoring unexpected control message"),
@@ -252,11 +271,15 @@ mod tests {
     fn only_the_host_reacts_to_open() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let recorded = seen.clone();
-        let role = Role::Host(Arc::new(move |id| recorded.lock().unwrap().push(id)));
+        let role = Role::Host(Arc::new(move |id, transport| {
+            recorded.lock().unwrap().push((id, transport))
+        }));
         role.handle("open 3");
+        role.handle("open-datagrams 6");
         role.handle("ready 4");
         joiner_role().handle("open 5");
-        assert_eq!(*seen.lock().unwrap(), [3]);
+        let expected = [(3, Transport::Stream), (6, Transport::Datagrams)];
+        assert_eq!(*seen.lock().unwrap(), expected);
     }
 
     async fn connected_pair() -> (Peer, Peer, Arc<dyn DataChannel>, Arc<dyn DataChannel>) {

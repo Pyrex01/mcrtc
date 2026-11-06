@@ -272,20 +272,43 @@ fn outline(painter: &Painter, rect: Rect, color: Color32) {
 }
 
 pub fn button(ui: &mut Ui, theme: &Theme, text: &str, width: f32, enabled: bool) -> Response {
+    let info = WidgetInfo::labeled(Role::Button, enabled, text);
+    paint_button(ui, theme, text, width, enabled, false, info)
+}
+
+/// One button of a set where exactly one stays picked, which is outlined and yellow.
+pub fn choice(ui: &mut Ui, theme: &Theme, text: &str, width: f32, selected: bool) -> Response {
+    let info = WidgetInfo::selected(Role::RadioButton, true, selected, text);
+    paint_button(ui, theme, text, width, true, selected, info)
+}
+
+fn paint_button(
+    ui: &mut Ui,
+    theme: &Theme,
+    text: &str,
+    width: f32,
+    enabled: bool,
+    selected: bool,
+    info: WidgetInfo,
+) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(vec2(width, BUTTON_HEIGHT), sense);
-    response.widget_info(|| WidgetInfo::labeled(Role::Button, enabled, text));
+    response.widget_info(|| info.clone());
     if !ui.is_rect_visible(rect) {
         return response;
     }
 
     let painter = ui.painter();
-    let lit = enabled && (response.hovered() || response.has_focus());
-    let color = if enabled { WHITE } else { MUTED };
+    let lit = selected || (enabled && (response.hovered() || response.has_focus()));
+    let color = match (selected, enabled) {
+        (true, _) => YELLOW,
+        (false, true) => WHITE,
+        (false, false) => MUTED,
+    };
     if enabled {
         theme.tile(painter, &theme.stone, rect, 16.0, Color32::WHITE);
         let inner = rect.shrink(1.0);

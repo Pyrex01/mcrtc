@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver};
@@ -24,7 +24,7 @@ impl Process {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
@@ -154,6 +154,100 @@ fn two_friends_reach_the_server_through_real_processes() {
     assert_tunnel_works(second_port, b"hello from sam");
     assert_tunnel_works(first_port, b"alex is still here");
     drop((first, second));
+}
+
+/// The friend's mcrtc takes one port on both protocols for Bedrock.
+fn free_tcp_and_udp_address() -> SocketAddr {
+    loop {
+        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = tcp.local_addr().unwrap();
+        if UdpSocket::bind(address).is_ok() {
+            return address;
+        }
+    }
+}
+
+fn udp_echo_server() -> u16 {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut buffer = [0; 2048];
+        while let Ok((read, client)) = socket.recv_from(&mut buffer) {
+            let _ = socket.send_to(&buffer[..read], client);
+        }
+    });
+    port
+}
+
+#[test]
+fn a_bedrock_game_reaches_the_server_through_real_processes() {
+    let config = no_stun_config("bedrock");
+    let config = config.to_str().unwrap();
+    let server = format!("127.0.0.1:{}", udp_echo_server());
+    let args = [
+        "host",
+        "--edition",
+        "bedrock",
+        "--server",
+        &server,
+        "--config",
+        config,
+    ];
+    let mut host = Process::spawn(&args);
+    host.wait_contains("Name for this friend");
+    host.send("alex");
+    let invite = host.wait_for(|line| line.starts_with("mcrtc1:"));
+
+    let address = free_tcp_and_udp_address();
+    let listen = address.to_string();
+    let args = [
+        "join",
+        "--edition",
+        "bedrock",
+        "--listen",
+        &listen,
+        "--config",
+        config,
+    ];
+    let mut friend = Process::spawn(&args);
+    friend.wait_contains("Paste the INVITE");
+    friend.send(&invite);
+    let reply = friend.wait_for(|line| line.starts_with("mcrtc1:"));
+    host.wait_contains("REPLY here");
+    host.send(&reply);
+    host.wait_contains("alex connected.");
+    friend.wait_contains("Connected!");
+
+    let game = UdpSocket::bind("127.0.0.1:0").unwrap();
+    game.connect(address).unwrap();
+    game.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let mut answer = [0; 32];
+    for _ in 0..(LIMIT.as_millis() / 200) {
+        game.send(b"hello from bedrock").unwrap();
+        if let Ok(read) = game.recv(&mut answer) {
+            assert_eq!(&answer[..read], b"hello from bedrock");
+            return;
+        }
+    }
+    panic!("no datagram came back");
+}
+
+#[test]
+fn an_invite_for_the_other_edition_is_refused_with_directions() {
+    let config = no_stun_config("mismatch");
+    let config = config.to_str().unwrap();
+    let args = ["host", "--edition", "bedrock", "--config", config];
+    let mut host = Process::spawn(&args);
+    host.wait_contains("Name for this friend");
+    host.send("alex");
+    let invite = host.wait_for(|line| line.starts_with("mcrtc1:"));
+
+    let listen = format!("127.0.0.1:{}", free_port());
+    let mut friend = Process::spawn(&["join", "--listen", &listen, "--config", config]);
+    friend.wait_contains("Paste the INVITE");
+    friend.send(&invite);
+    friend.wait_contains("--edition bedrock");
 }
 
 #[test]
