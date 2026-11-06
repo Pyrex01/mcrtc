@@ -1,0 +1,16 @@
+# Copy to mcrtc.toml and pass it with --config. Every key is optional; flags win over this file.
+
+# Replaces the default STUN servers. An empty list means no STUN at all.
+# stun = ["stun:stun.l.google.com:19302", "stun:stun.cloudflare.com:3478"]
+
+# server = "127.0.0.1:25565"   # host: the Minecraft server
+# listen = "127.0.0.1:25565"   # join: where Minecraft connects
+# max_peers = 8                # host: friends at once
+# max_connections = 16         # host: TCP connections per friend
+# whitelist_file = "ids.txt"   # host: allowed mcrtc IDs
+# identity = "mcrtc-id.pem"    # join: keeps your mcrtc ID stable
+
+# [[turn]]
+# url = "turn:turn.example.com:3478?transport=udp"
+# username = "user"
+# password = "secret"
