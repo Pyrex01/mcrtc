@@ -14,7 +14,7 @@ use bytes::BytesMut;
 use tokio::net::{lookup_host, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Instant};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelState};
 
 use crate::bridge::BUFFERED_LOW;
@@ -79,6 +79,14 @@ impl Endpoint {
             address,
             inbound,
             port,
+        }
+    }
+
+    /// Which side of the tunnel this is, for the packet trace.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Server { .. } => "server",
+            Self::Client { .. } => "game",
         }
     }
 
@@ -182,6 +190,15 @@ fn advertise_port(data: &[u8], port: u16) -> Option<Vec<u8>> {
     Some(pong)
 }
 
+/// With `-vv`: each datagram's RakNet packet ID and size, which shows how far a handshake gets
+/// (0x01/0x1c ping and pong, 0x05-0x08 opening the connection, 0x80-0x8d data, 0xa0/0xc0 acks).
+/// Never the contents.
+fn trace_packet(from: &str, to: &str, data: &[u8]) {
+    if let Some(id) = data.first() {
+        trace!("{from} -> {to}: {id:#04x}, {} bytes", data.len());
+    }
+}
+
 /// Sends unless too much is already queued. Waiting would only hand RakNet stale data, so a
 /// congested link drops datagrams the way any other network would.
 async fn forward(channel: &dyn DataChannel, data: BytesMut) {
@@ -213,6 +230,7 @@ async fn relay_with(mut end: Endpoint, channel: Arc<dyn DataChannel>, idle_timeo
             }
             data = end.recv(), if open => {
                 let Some(data) = data else { break };
+                trace_packet(end.name(), "tunnel", &data);
                 idle.as_mut().reset(Instant::now() + idle_timeout);
                 forward(channel.as_ref(), data).await;
             }
@@ -220,6 +238,7 @@ async fn relay_with(mut end: Endpoint, channel: Arc<dyn DataChannel>, idle_timeo
                 Some(DataChannelEvent::OnOpen) => open = true,
                 Some(DataChannelEvent::OnMessage(message)) => {
                     idle.as_mut().reset(Instant::now() + idle_timeout);
+                    trace_packet("tunnel", end.name(), &message.data);
                     if let Err(error) = end.send(&message.data).await {
                         debug!(%error, "could not hand a datagram to Minecraft");
                     }

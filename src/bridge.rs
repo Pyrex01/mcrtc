@@ -8,9 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, warn};
@@ -89,12 +87,15 @@ struct Signals {
 }
 
 /// Pumps bytes both ways until either side closes, then closes the other.
-pub async fn bridge(mut stream: TcpStream, channel: Arc<dyn DataChannel>) {
-    if let Err(error) = stream.set_nodelay(true) {
-        warn!(%error, "could not set TCP_NODELAY");
-    }
-
-    let (mut tcp_in, mut tcp_out) = stream.split();
+///
+/// `stream` is usually a TCP connection, which the caller should give `TCP_NODELAY` (see
+/// [`no_delay`]). It can also be one end of an in-process pipe, such as the NetherNet signaling
+/// rewriter's.
+pub async fn bridge<S>(stream: S, channel: Arc<dyn DataChannel>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut tcp_in, mut tcp_out) = tokio::io::split(stream);
     let (queue_tx, queue_rx) = mpsc::channel(INBOUND_QUEUE);
     let signals = Signals::default();
 
@@ -140,9 +141,16 @@ async fn pump_events(channel: &dyn DataChannel, queue: mpsc::Sender<BytesMut>, s
     }
 }
 
+/// Game traffic is many small writes that should leave at once.
+pub fn no_delay(stream: &tokio::net::TcpStream) {
+    if let Err(error) = stream.set_nodelay(true) {
+        warn!(%error, "could not set TCP_NODELAY");
+    }
+}
+
 async fn write_tcp(
     mut queue: mpsc::Receiver<BytesMut>,
-    tcp: &mut WriteHalf<'_>,
+    tcp: &mut (impl AsyncWrite + Unpin),
 ) -> std::io::Result<()> {
     while let Some(data) = queue.recv().await {
         timeout(WRITE_STALL_TIMEOUT, tcp.write_all(&data)).await??;
@@ -151,7 +159,7 @@ async fn write_tcp(
 }
 
 async fn read_tcp(
-    tcp: &mut ReadHalf<'_>,
+    tcp: &mut (impl AsyncRead + Unpin),
     channel: &dyn DataChannel,
     signals: &Signals,
 ) -> anyhow::Result<()> {

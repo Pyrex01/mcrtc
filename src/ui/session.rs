@@ -49,6 +49,8 @@ pub struct Settings {
     pub turn_url: String,
     pub turn_user: String,
     pub turn_pass: String,
+    /// Bedrock joins only: no TCP listener, for RakNet servers. See [`JoinOptions`].
+    pub udp_only: bool,
 }
 
 struct Session {
@@ -183,6 +185,8 @@ impl Sessions {
                         peer,
                         edition,
                         listen,
+                        udp_only: settings.udp_only,
+                        nethernet_address: None,
                         raw_json: false,
                         reporter: reporter.clone(),
                     };

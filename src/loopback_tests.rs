@@ -17,6 +17,7 @@ use crate::bridge::{Counter, BUFFERED_HIGH};
 use crate::control::{self, PendingOpens, Role};
 use crate::datagram::test_support::{pong, pong_status, STATUS};
 use crate::edition::Edition;
+use crate::nethernet::Relay;
 use crate::peer::test_support::*;
 use crate::peer::{Peer, PeerOptions};
 use crate::{host, join};
@@ -78,6 +79,7 @@ impl Harness {
             server,
             max_connections,
             listen,
+            None,
             |tunnel, stopped| {
                 tokio::spawn(tunnel.serve(listener, stopped));
             },
@@ -94,6 +96,7 @@ impl Harness {
             server,
             max_connections,
             listen,
+            None,
             |tunnel, stopped| {
                 tokio::spawn(tunnel.clone().serve_udp(socket, stopped.clone()));
                 tokio::spawn(tunnel.serve(listener, stopped));
@@ -107,6 +110,7 @@ impl Harness {
         server: SocketAddr,
         max_connections: Option<usize>,
         listen: SocketAddr,
+        nethernet: Option<Arc<Relay>>,
         serve: impl FnOnce(join::Tunnel, watch::Receiver<bool>),
     ) -> Self {
         let _ = tracing_subscriber::fmt()
@@ -158,6 +162,7 @@ impl Harness {
             pending: pending.clone(),
             connections: join_connections.clone(),
             next_id: Arc::default(),
+            nethernet,
         };
         tokio::spawn(control::run(
             join_control,
@@ -751,5 +756,130 @@ async fn a_java_host_refuses_datagrams() {
         .await;
     assert!(!refused);
     assert_echoes(harness.connect().await, random_bytes(1_000)).await;
+    harness.close().await;
+}
+
+/// Reads one HTTP message framed by `Content-Length`.
+async fn read_http(stream: &mut TcpStream) -> (String, String) {
+    let mut data = Vec::new();
+    let mut byte = [0; 1];
+    while !data.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).await.unwrap();
+        data.push(byte[0]);
+    }
+    let head = String::from_utf8(data).unwrap();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.unwrap();
+    (head, String::from_utf8(body).unwrap())
+}
+
+/// A NetherNet server: signaling over TCP and the game's WebRTC over UDP, on one port. Its answer
+/// names itself, which the game must never see.
+async fn fake_nethernet_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind(address).await.unwrap();
+    tokio::spawn(async move {
+        let mut buffer = [0; 1500];
+        while let Ok((len, from)) = udp.recv_from(&mut buffer).await {
+            let _ = udp.send_to(&buffer[..len], from).await;
+        }
+    });
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (head, body) = read_http(&mut stream).await;
+                assert!(head.starts_with("POST /v1/join/7 "));
+                // The game's own address never reaches the server.
+                assert!(!body.contains("10.1.2.3"), "{body}");
+                assert!(body.contains("a=candidate:mcrtc 1 udp 1 192.0.2.1 9 typ host"));
+                let answer = format!(
+                    "v=0\r\na=fingerprint:sha-256 AA\r\na=candidate:1 1 udp 2122260223 {} {} \
+                     typ host\r\na=setup:passive\r\n",
+                    address.ip(),
+                    address.port()
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/sdp\r\ncontent-length: {}\r\n\r\n{answer}",
+                    answer.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    });
+    address
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nethernet_join_is_pointed_at_the_relay_and_rides_the_tunnel() {
+    let server = fake_nethernet_server().await;
+    let relay_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let relay = Arc::new(Relay::new(relay_socket.local_addr().unwrap()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
+    let serving_relay = relay.clone();
+    let harness = Harness::start_with(
+        Edition::Bedrock,
+        server,
+        None,
+        listen,
+        Some(relay.clone()),
+        |tunnel, stopped| {
+            tokio::spawn(tunnel.clone().serve_nethernet(
+                relay_socket,
+                serving_relay,
+                stopped.clone(),
+            ));
+            tokio::spawn(tunnel.serve(listener, stopped));
+        },
+    )
+    .await;
+
+    // The game signals through mcrtc and is told to connect to the relay, not the server.
+    let offer = "v=0\r\na=candidate:1 1 udp 2122260223 10.1.2.3 50000 typ host\r\n\
+                 a=ice-ufrag:abcd\r\n";
+    let request = format!(
+        "POST /v1/join/7 HTTP/1.1\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{offer}",
+        offer.len()
+    );
+    let mut game = harness.connect().await;
+    game.write_all(request.as_bytes()).await.unwrap();
+    let (head, answer) = timeout(LIMIT, read_http(&mut game)).await.unwrap();
+    assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+    assert!(answer.contains(&format!(
+        "a=candidate:mcrtc 1 udp 2130706431 127.0.0.1 {} typ host",
+        relay.candidate.port()
+    )));
+    assert!(!answer.contains(&format!(" {} typ host", server.port())));
+    assert!(answer.contains("a=fingerprint:sha-256 AA"));
+    // The offer named 10.1.2.3, so the game may use the relay from there.
+    assert!(relay.allows("10.1.2.3".parse().unwrap()));
+
+    // The game's own connection goes to the relay and through the tunnel to the server.
+    let webrtc = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let stun = random_bytes(120);
+    let mut buffer = [0; 1500];
+    let echoed = timeout(LIMIT, async {
+        loop {
+            webrtc.send_to(&stun, relay.candidate).await.unwrap();
+            if let Ok(Ok((len, _))) =
+                timeout(Duration::from_millis(500), webrtc.recv_from(&mut buffer)).await
+            {
+                return buffer[..len].to_vec();
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(echoed, stun);
     harness.close().await;
 }

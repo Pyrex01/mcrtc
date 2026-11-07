@@ -80,6 +80,8 @@ impl Forms {
             turn_url: self.turn_url.clone(),
             turn_user: self.turn_user.clone(),
             turn_pass: self.turn_pass.clone(),
+            // The window has no control for this yet; `mcrtc join --udp-only` does.
+            udp_only: false,
         }
     }
 

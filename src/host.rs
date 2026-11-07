@@ -12,7 +12,7 @@ use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, info, warn};
 use webrtc::data_channel::DataChannel;
 
-use crate::bridge::{bridge, Counter, Slot};
+use crate::bridge::{bridge, no_delay, Counter, Slot};
 use crate::console::Console;
 use crate::control::{self, channel_label, stream_id, ControlEnd, Role, Transport};
 use crate::datagram::{self, relay, Endpoint};
@@ -80,7 +80,10 @@ impl Tunnel {
         control::answer_open(self.control.as_ref(), id, true).await;
         debug!(peer = %self.label, channel = %channel_name, "connection opened");
         match server {
-            Server::Tcp(stream) => bridge(stream, channel).await,
+            Server::Tcp(stream) => {
+                no_delay(&stream);
+                bridge(stream, channel).await
+            }
             Server::Udp(socket) => relay(Endpoint::server(socket), channel).await,
         }
         debug!(peer = %self.label, channel = %channel_name, "connection closed");

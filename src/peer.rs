@@ -136,8 +136,12 @@ impl Peer {
         }
         let settings = SettingEngineBuilder::default()
             .with_ice_connection_attempts(Some(ICE_CHECK_INTERVAL), Some(ICE_MAX_CHECKS))
-            .with_ice_timeouts(None, Some(ICE_WAIT), None)
-            .build();
+            .with_ice_timeouts(None, Some(ICE_WAIT), None);
+        // mcrtc never offers `.local` candidates, and on Android the multicast socket mDNS binds
+        // needs a MulticastLock the app does not hold.
+        #[cfg(target_os = "android")]
+        let settings = settings.with_multicast_dns_mode(rtc::ice::mdns::MulticastDnsMode::Disabled);
+        let settings = settings.build();
         let pc = PeerConnectionBuilder::new()
             .with_configuration(configuration.build())
             .with_setting_engine(settings)

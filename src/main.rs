@@ -10,6 +10,7 @@ mod invite;
 mod join;
 #[cfg(test)]
 mod loopback_tests;
+mod nethernet;
 mod peer;
 mod ui;
 
@@ -76,6 +77,10 @@ enum Command {
         /// Keep a stable mcrtc ID in this file, created on first use
         #[arg(long, value_name = "FILE")]
         identity: Option<PathBuf>,
+
+        /// Bedrock: listen on UDP only, for RakNet servers that also accept TCP on their port
+        #[arg(long)]
+        udp_only: bool,
     },
 }
 
@@ -160,7 +165,11 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             };
             runtime.block_on(host::run(options, Console::from_stdin(), spawn_ctrl_c()))
         }
-        Command::Join { listen, identity } => {
+        Command::Join {
+            listen,
+            identity,
+            udp_only,
+        } => {
             if let Some(path) = identity.or(file.identity) {
                 peer.certificate = Some(load_or_create_identity(&path)?);
             }
@@ -168,6 +177,8 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                 peer,
                 edition,
                 listen: listen.or(file.listen).unwrap_or(default_address),
+                udp_only,
+                nethernet_address: None,
                 raw_json,
                 reporter: Reporter::terminal(),
             };

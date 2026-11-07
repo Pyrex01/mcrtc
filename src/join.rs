@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use tokio::time::{sleep, timeout, Instant};
 use tracing::{debug, warn};
 use webrtc::data_channel::DataChannel;
 
-use crate::bridge::{bridge, Counter, Slot};
+use crate::bridge::{bridge, no_delay, Counter, Slot};
 use crate::console::Console;
 use crate::control::{self, channel_label, stream_id, ControlEnd, PendingOpens, Role, Transport};
 use crate::datagram::{relay, Endpoint, MAX_DATAGRAM};
@@ -23,6 +23,7 @@ use crate::edition::Edition;
 use crate::events::{Event, Reporter};
 use crate::host::report_stats;
 use crate::invite::{Payload, PayloadType, DEFAULT_TTL};
+use crate::nethernet::{self, rewrite_signaling, Relay};
 use crate::peer::{certificate_id, generate_certificate, ChannelHandler, Peer, PeerOptions};
 
 /// The host needs time to receive and paste the reply, so this is as long as a reply stays valid.
@@ -43,26 +44,85 @@ pub struct JoinOptions {
     pub peer: PeerOptions,
     pub edition: Edition,
     pub listen: String,
+    /// Bedrock only: listen on UDP alone, for RakNet servers that also take TCP on their port,
+    /// where a TCP connection would lead the game away from RakNet. NetherNet servers (Geyser's
+    /// default transport) sign players in over TCP and need it. Ignored for Java.
+    pub udp_only: bool,
+    /// Bedrock only: the address to offer the game for its NetherNet connection, instead of the
+    /// one the default route leaves from. For tests on loopback.
+    pub nethernet_address: Option<IpAddr>,
     pub raw_json: bool,
     pub reporter: Reporter,
 }
 
+/// The pipe between a game's signaling connection and its bridge holds about one SDP.
+const SIGNALING_PIPE: usize = 64 * 1024;
+
 /// Where Minecraft connects. Bedrock takes the same port on both protocols, because a server is
-/// reached over TCP when it signals with NetherNet and over UDP when it speaks RakNet. NetherNet
-/// only needs the signaling carried: the game's own WebRTC connects to the server by itself.
+/// reached over TCP when it signals with NetherNet and over UDP when it speaks RakNet. The game's
+/// own NetherNet connection gets a socket of its own, see [`crate::nethernet`].
 struct Listener {
-    tcp: TcpListener,
+    tcp: Option<TcpListener>,
     udp: Option<UdpSocket>,
+    nethernet: Option<(UdpSocket, Arc<Relay>)>,
 }
 
 impl Listener {
-    async fn bind(edition: Edition, address: &str) -> io::Result<Self> {
+    async fn bind(options: &JoinOptions) -> io::Result<Self> {
+        let (edition, address) = (options.edition, options.listen.as_str());
+        if edition == Edition::Bedrock && options.udp_only {
+            let udp = UdpSocket::bind(address).await?;
+            return Ok(Self {
+                tcp: None,
+                udp: Some(udp),
+                nethernet: None,
+            });
+        }
         let tcp = TcpListener::bind(address).await?;
-        let udp = match edition {
-            Edition::Java => None,
-            Edition::Bedrock => Some(UdpSocket::bind(tcp.local_addr()?).await?),
+        let (udp, nethernet) = match edition {
+            Edition::Java => (None, None),
+            Edition::Bedrock => (
+                Some(UdpSocket::bind(tcp.local_addr()?).await?),
+                bind_nethernet(options.nethernet_address).await,
+            ),
         };
-        Ok(Self { tcp, udp })
+        Ok(Self {
+            tcp: Some(tcp),
+            udp,
+            nethernet,
+        })
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        match (&self.tcp, &self.udp) {
+            (Some(tcp), _) => tcp.local_addr(),
+            (None, Some(udp)) => udp.local_addr(),
+            (None, None) => Err(io::Error::other("nothing to listen on")),
+        }
+    }
+}
+
+/// The socket the game's NetherNet connection is pointed at. Without one, NetherNet signaling is
+/// still carried, but the game then connects to the server directly or not at all.
+async fn bind_nethernet(address: Option<IpAddr>) -> Option<(UdpSocket, Arc<Relay>)> {
+    let Some(ip) = address.or_else(nethernet::local_address) else {
+        warn!("no network address for the NetherNet relay; NetherNet servers may not work");
+        return None;
+    };
+    let bound = async {
+        let socket = UdpSocket::bind((ip, 0)).await?;
+        let address = socket.local_addr()?;
+        Ok::<_, io::Error>((socket, address))
+    };
+    match bound.await {
+        Ok((socket, address)) => {
+            debug!(%address, "NetherNet relay listening");
+            Some((socket, Arc::new(Relay::new(address))))
+        }
+        Err(error) => {
+            warn!(%error, "could not start the NetherNet relay");
+            None
+        }
     }
 }
 
@@ -75,6 +135,8 @@ pub struct Tunnel {
     pub connections: Counter,
     /// Shared by the listeners, because every connection needs its own stream ID.
     pub next_id: Arc<AtomicU64>,
+    /// Bedrock: rewrites NetherNet signaling so the game's own connection comes to this relay.
+    pub nethernet: Option<Arc<Relay>>,
 }
 
 impl Tunnel {
@@ -102,7 +164,27 @@ impl Tunnel {
 
     /// Reads datagrams until `shutdown`, starting a flow for each client address it has not seen.
     /// Flows live on until they go quiet or the peer connection ends.
-    pub async fn serve_udp(self, socket: UdpSocket, mut shutdown: watch::Receiver<bool>) {
+    pub async fn serve_udp(self, socket: UdpSocket, shutdown: watch::Receiver<bool>) {
+        self.serve_datagrams(socket, None, shutdown).await;
+    }
+
+    /// Like [`Tunnel::serve_udp`], for the NetherNet relay socket. That one listens on a real
+    /// interface, so only the game's own addresses may open flows.
+    pub async fn serve_nethernet(
+        self,
+        socket: UdpSocket,
+        relay: Arc<Relay>,
+        shutdown: watch::Receiver<bool>,
+    ) {
+        self.serve_datagrams(socket, Some(relay), shutdown).await;
+    }
+
+    async fn serve_datagrams(
+        self,
+        socket: UdpSocket,
+        allowed: Option<Arc<Relay>>,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
         let socket = Arc::new(socket);
         let port = socket.local_addr().map_or(0, |address| address.port());
         let mut flows = HashMap::<SocketAddr, mpsc::Sender<BytesMut>>::new();
@@ -125,6 +207,13 @@ impl Tunnel {
 
             if let Some(flow) = flows.get(&client).filter(|flow| !flow.is_closed()) {
                 let _ = flow.try_send(data);
+                continue;
+            }
+            if allowed
+                .as_ref()
+                .is_some_and(|relay| !relay.allows(client.ip()))
+            {
+                debug!(%client, "ignoring a datagram from outside this machine");
                 continue;
             }
             flows.retain(|_, flow| !flow.is_closed());
@@ -189,7 +278,16 @@ impl Tunnel {
             .request(self.control.as_ref(), id, transport)
             .await
         {
-            bridge(stream, channel).await;
+            no_delay(&stream);
+            match self.nethernet {
+                Some(relay) => {
+                    let (game_side, bridge_side) = tokio::io::duplex(SIGNALING_PIPE);
+                    let rewriter = tokio::spawn(rewrite_signaling(stream, game_side, relay));
+                    bridge(bridge_side, channel).await;
+                    let _ = rewriter.await;
+                }
+                None => bridge(stream, channel).await,
+            }
         } else {
             warn!(channel = %label, "the host refused a connection");
             let _ = channel.close().await;
@@ -224,16 +322,14 @@ pub async fn run(
 ) -> Result<()> {
     let reporter = options.reporter.clone();
     // Bind first: finding out the port is taken is better before the invite dance than after it.
-    let listener = Listener::bind(options.edition, &options.listen)
-        .await
-        .with_context(|| {
-            format!(
-                "could not listen on {0}. Is something already using it? If the Minecraft server \
+    let listener = Listener::bind(&options).await.with_context(|| {
+        format!(
+            "could not listen on {0}. Is something already using it? If the Minecraft server \
                  runs on this machine, pick another port with --listen {1}",
-                options.listen,
-                options.edition.spare_address()
-            )
-        })?;
+            options.listen,
+            options.edition.spare_address()
+        )
+    })?;
 
     let certificate = match options.peer.certificate.take() {
         Some(certificate) => certificate,
@@ -287,7 +383,7 @@ pub async fn run(
         },
     };
 
-    let address = listener.tcp.local_addr()?.to_string();
+    let address = listener.local_addr()?.to_string();
     reporter.report(Event::Joined { address, route });
     let connections = Counter::default();
     let pending = PendingOpens::default();
@@ -297,12 +393,22 @@ pub async fn run(
         pending: pending.clone(),
         connections: connections.clone(),
         next_id: Arc::default(),
+        nethernet: listener.nethernet.as_ref().map(|(_, relay)| relay.clone()),
     };
     let (stop_serving, serving) = watch::channel(false);
     let datagrams = listener
         .udp
         .map(|socket| tokio::spawn(tunnel.clone().serve_udp(socket, serving.clone())));
-    let server = tokio::spawn(tunnel.serve(listener.tcp, serving));
+    let nethernet = listener.nethernet.map(|(socket, relay)| {
+        tokio::spawn(
+            tunnel
+                .clone()
+                .serve_nethernet(socket, relay, serving.clone()),
+        )
+    });
+    let server = listener
+        .tcp
+        .map(|tcp| tokio::spawn(tunnel.serve(tcp, serving)));
 
     let (rtt, measured) = watch::channel(None);
     let stats = report_stats(
@@ -321,9 +427,14 @@ pub async fn run(
     };
 
     stop_serving.send_replace(true);
-    let _ = server.await;
+    if let Some(server) = server {
+        let _ = server.await;
+    }
     if let Some(datagrams) = datagrams {
         let _ = datagrams.await;
+    }
+    if let Some(nethernet) = nethernet {
+        let _ = nethernet.await;
     }
     peer.close().await;
     let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
