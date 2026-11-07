@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "android/rust"]
 
 [package]
 name = "mcrtc"

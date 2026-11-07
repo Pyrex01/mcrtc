@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two blocks joined by a link: a tunnel between two worlds. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:pathData="M30,42h16v24h-16z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M62,42h16v24h-16z" />
+    <path android:fillColor="#C8E6C9" android:pathData="M46,51h16v6h-16z" />
+</vector>

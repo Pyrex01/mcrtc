@@ -10,9 +10,9 @@ Friend's MC client -> 127.0.0.1:25565 -> [mcrtc join] ~~WebRTC~~ [mcrtc host] ->
 ```
 
 Bedrock uses port 19132 in place of 25565, and mcrtc carries both TCP and UDP on it: NetherNet
-servers signal over TCP, and RakNet servers use UDP. Whether this gets a player into a current
-server is not proven yet: see [Limitations](#limitations). Both ends need mcrtc, so a friend needs
-a PC to run it on; consoles cannot run it.
+servers signal over TCP, and RakNet servers use UDP. The game's own NetherNet connection is relayed
+too, see [NetherNet](#nethernet). Both ends need mcrtc, so a friend needs a PC or an Android phone
+(see [Android](#android)); consoles cannot run it.
 
 ![Title screen](docs/title-screen.png)
 
@@ -136,6 +136,63 @@ friend owns that certificate, so an ID cannot be faked by copying it. Without `-
 ID is generated on every run. In the interface, set `whitelist_file` and `identity` in a config
 file and start it with `mcrtc ui --config mcrtc.toml`.
 
+## Java and Bedrock friends on one server (Geyser)
+
+A Java server with a translation plugin such as [Geyser](https://geysermc.org) accepts Bedrock
+players on a UDP port of its own, usually 19132. An invite is for one edition, so run one host
+session per edition, side by side:
+
+```sh
+mcrtc host --edition java --server 127.0.0.1:25565     # for Java friends
+mcrtc host --edition bedrock --server 127.0.0.1:19132  # for Bedrock friends, to Geyser
+```
+
+Point the Bedrock session at Geyser's `bedrock.port` from its `config.yml`, not at the Java port.
+Use two terminals, or two windows of the interface. The sessions do not get in each other's way,
+and both can use the same `--whitelist-file`; `--max-peers` and `--max-connections` count each
+session separately. An invite from the wrong session is refused at once with a message naming the
+edition to use, so just make a new one from the other session.
+
+Geyser 2.12 and newer default to `transport: nethernet`, as current Bedrock clients expect. That
+works through mcrtc with no extra setup: the join side carries the signaling and points the game's
+own connection at a relay of its own (see [NetherNet](#nethernet)). Keep Geyser's `webrtc-port` at
+`0`, its default, so that connection uses the same port as signaling, and leave
+`advertise-addresses` empty. Like everyone else through mcrtc, Bedrock players appear to Geyser and
+the server as `127.0.0.1`.
+
+## Android
+
+The Android app joins a Bedrock server hosted with `mcrtc host --edition bedrock`. It does what
+`mcrtc join` does, and keeps the tunnel alive in the background while Minecraft is open. Install
+`mcrtc-android.apk` (arm64), then:
+
+1. Share the host's invite to **mcrtc** from Discord, WhatsApp or anything else, or paste it, and
+   tap **Connect**.
+2. Send the reply back with **Copy** or **Share**, and wait for **Connected**.
+3. In Minecraft: Play, Servers, Add Server, with address `127.0.0.1` and port `19132`.
+
+Allow notifications: the ongoing notification is what keeps the tunnel running. Leave
+**RakNet only (UDP)** in the app's settings off for Geyser and current Bedrock servers.
+
+If Minecraft hangs on an empty box with only a **Back** button, turn on Settings, General,
+**Allow mobile data for online play**. Minecraft counts a phone that shares its own hotspot as being
+on mobile data, and without that setting it never starts the join.
+
+## NetherNet
+
+Current Bedrock joins a server in two steps: HTTP signaling over TCP (`GET /v1/join`, then
+`POST /v1/join/{id}` with a WebRTC offer, answered by the server), then the game's own WebRTC
+connection over UDP to an address in the answer. Left alone, that connection would go straight to
+the server and miss the tunnel, and the game ignores `127.0.0.1`, so the server cannot simply
+advertise loopback.
+
+So `mcrtc join` rewrites the signaling as it passes. The answer's addresses become one of the
+joining machine's own, where a relay socket hands the game's datagrams to the tunnel. The offer's
+addresses become an unroutable placeholder, so the server only reaches the game through the tunnel
+and never learns its addresses. Fingerprints, credentials and the server's identity are not
+touched. With `-vv`, the host logs each datagram's first byte: STUN is `0x00`/`0x01`, DTLS
+`0x14`-`0x17`.
+
 ## How it works
 
 1. The host creates a WebRTC offer, waits for ICE gathering to finish, and prints it as an invite.
@@ -197,14 +254,12 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
   as usual.
 - A connection stuck for up to 30 seconds can delay that friend's other connections.
 - mcrtc does not reconnect. If a connection drops, make a new invite.
-- **Bedrock has not been tested with the game itself, and NetherNet may not get through.** A
-  1.26.62 dedicated server defaults to `transport=nethernet`. mcrtc carries its HTTP signaling,
-  but gameplay is the game's own WebRTC connecting straight to the server, so that connection
-  still has to cross both routers without mcrtc's help. `online-mode=false` turns the signaling
-  port off, and `transport=raknet` logs that players cannot connect. A scripted RakNet handshake
-  does get accepted by that server through the tunnel.
-- Consoles cannot run mcrtc. Phones and tablets cannot either, so they would need it running on a
-  PC on the same network, with `--listen` set to an address they can reach.
+- **NetherNet has been tested with one setup:** Minecraft 1.26.62 on Android, joining a Java 26.3
+  server through Geyser 2.12.1 (`transport: nethernet`). The server's WebRTC must share the Bedrock
+  port (Geyser `webrtc-port: 0`, the default), because the host relays to the server address.
+  A Bedrock dedicated server with a separate `server-udp-ports` is not supported yet.
+- Consoles cannot run mcrtc. iPhones and iPads cannot either; Android phones have the
+  [Android app](#android).
 
 ## TURN setup
 
@@ -237,6 +292,8 @@ The log line `connected via ... (relayed through TURN)` confirms it is in use.
 | `could not listen on 127.0.0.1:25565` | The server or another program has the port. Use `--listen 127.0.0.1:25566`. |
 | `this invite is for Bedrock Edition` | You and the host picked different editions. Pick the one it names. |
 | Bedrock on Windows cannot see `127.0.0.1` | Older Store versions block loopback. Run `CheckNetIsolation LoopbackExempt -a -n="Microsoft.MinecraftUWP_8wekyb3d8bbwe"` as administrator. |
+| Bedrock on a phone hangs on an empty box with only **Back** | Turn on Minecraft's Settings, General, **Allow mobile data for online play**. |
+| Bedrock joins, but `-vv` shows no UDP through the tunnel | The game went straight to the server. Check that the joiner runs this version, and that the app's **RakNet only (UDP)** is off. |
 | Friend connects but Minecraft cannot reach the server | Check that the server is running and that `--server` matches its port. The host logs `could not reach the Minecraft server`. |
 | `this invite expired` | Make a new invite. They last 10 minutes. |
 | `the string is corrupted or was cut off` | Copy it again. Some chat apps cut long messages, so try sending it as a file, or use the interface. |

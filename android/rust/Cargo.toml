@@ -1,0 +1,29 @@
+[package]
+name = "mcrtc-android"
+version = "0.1.0"
+edition = "2021"
+description = "The mcrtc tunnel core for the Android app, exposed to Kotlin through UniFFI"
+publish = false
+
+[lib]
+name = "mcrtc_android"
+# cdylib for the app, lib for the tests and the bindgen binary.
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+mcrtc = { path = "../..", default-features = false }
+anyhow = "1.0.104"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uniffi = { version = "0.32.2", features = ["cli"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+paranoid-android = "0.2.2"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["full"] }

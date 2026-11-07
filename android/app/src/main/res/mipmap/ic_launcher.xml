@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 7.x has no adaptive icons. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#2E7D32" android:pathData="M18,18h72v72h-72z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M30,42h16v24h-16z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M62,42h16v24h-16z" />
+    <path android:fillColor="#C8E6C9" android:pathData="M46,51h16v6h-16z" />
+</vector>
