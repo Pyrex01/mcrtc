@@ -4,7 +4,6 @@
 //! the flows run on the Tokio runtime, reporting back through [`Sessions`].
 
 mod art;
-mod session;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -26,8 +25,8 @@ use crate::control::stop_requested;
 use crate::edition::Edition;
 use crate::events::Event;
 
-pub use session::UiOptions;
-use session::{Mode, Sessions};
+pub use crate::session::UiOptions;
+use crate::session::{Mode, Sessions};
 use state::{clean_paste, describe_route, Message, Screen, State};
 use widgets::{Theme, BUTTON_HEIGHT, COLUMN, GAP, MUTED, RED, WHITE, YELLOW};
 

@@ -66,8 +66,8 @@ impl PeerOptions {
         }
     }
 
-    /// Host candidates on loopback only, for tests that must not touch the network.
-    #[cfg(test)]
+    /// Host candidates on loopback only, for tests that must not touch the network. Public so
+    /// the Android crate's tests can use it too.
     pub fn loopback() -> Self {
         Self {
             ice: IceConfig::default(),

@@ -1,5 +1,6 @@
-//! Runs the host and join flows for the window, the same ones the terminal drives. Lines go in
-//! through a [`Console`] and [`Event`]s come out on a channel the window drains every frame.
+//! Runs the host and join flows for a graphical frontend (the egui window or the Android app), the
+//! same flows the terminal drives. Lines go in through a [`Console`] and [`Event`]s come out on a
+//! channel the frontend drains.
 
 use std::collections::HashSet;
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};

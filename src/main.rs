@@ -1,19 +1,3 @@
-mod bridge;
-mod config;
-mod console;
-mod control;
-mod datagram;
-mod edition;
-mod events;
-mod host;
-mod invite;
-mod join;
-#[cfg(test)]
-mod loopback_tests;
-mod nethernet;
-mod peer;
-mod ui;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -23,13 +7,13 @@ use tokio::runtime::Runtime;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
 
-use config::{load_whitelist, CommonArgs, FileConfig, IceConfig};
-use console::Console;
-use events::Reporter;
-use host::HostOptions;
-use join::JoinOptions;
-use peer::{load_or_create_identity, PeerOptions};
-use ui::UiOptions;
+use mcrtc::config::{load_whitelist, CommonArgs, FileConfig, IceConfig};
+use mcrtc::console::Console;
+use mcrtc::events::Reporter;
+use mcrtc::host::{self, HostOptions};
+use mcrtc::join::{self, JoinOptions};
+use mcrtc::peer::{load_or_create_identity, PeerOptions};
+use mcrtc::session::UiOptions;
 
 const IP_WARNING: &str = "Warning: invites and replies contain your IP addresses. \
                           Only share them with people you trust.";
@@ -144,7 +128,7 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                     .map(load_whitelist)
                     .transpose()?,
             };
-            ui::run(options, runtime.handle().clone(), spawn_ctrl_c())
+            run_ui(options, runtime)
         }
         Command::Host {
             server,
@@ -185,6 +169,16 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             runtime.block_on(join::run(options, Console::from_stdin(), spawn_ctrl_c()))
         }
     }
+}
+
+#[cfg(feature = "gui")]
+fn run_ui(options: UiOptions, runtime: &Runtime) -> Result<()> {
+    mcrtc::ui::run(options, runtime.handle().clone(), spawn_ctrl_c())
+}
+
+#[cfg(not(feature = "gui"))]
+fn run_ui(_options: UiOptions, _runtime: &Runtime) -> Result<()> {
+    anyhow::bail!("this build has no graphical interface; use `mcrtc host` or `mcrtc join`")
 }
 
 // Not `#[tokio::main]`: some platforms only allow windows on the main thread, so the interface

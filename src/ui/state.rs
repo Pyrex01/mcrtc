@@ -3,7 +3,7 @@
 use crate::edition::Edition;
 use crate::events::Event;
 
-use super::session::{Mode, Settings};
+use crate::session::{Mode, Settings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {

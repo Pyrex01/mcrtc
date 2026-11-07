@@ -1,7 +1,15 @@
+[workspace]
+members = ["."]
+
 [package]
 name = "mcrtc"
 version = "0.1.0"
 edition = "2021"
+
+[features]
+default = ["gui"]
+# The egui window. Off for the Android library, which brings its own interface.
+gui = ["dep:eframe"]
 
 [dependencies]
 rand = "0.10.3"
@@ -10,7 +18,7 @@ async-trait = "0.1.92"
 base64 = "0.23.1"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
-eframe = { version = "0.37", default-features = false, features = [
+eframe = { version = "0.37", optional = true, default-features = false, features = [
     "accesskit",
     "clipboard",
     "default_fonts",

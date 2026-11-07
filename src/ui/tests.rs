@@ -12,9 +12,9 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use tokio::runtime::Runtime;
 
-use super::session::Settings;
 use super::*;
 use crate::peer::PeerOptions;
+use crate::session::Settings;
 
 const LIMIT: Duration = Duration::from_secs(30);
 
