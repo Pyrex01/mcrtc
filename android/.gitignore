@@ -7,3 +7,8 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# The release keystore and its passwords.
+key.properties
+*.jks
+*.keystore

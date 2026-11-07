@@ -1,29 +1,27 @@
 [package]
 name = "mcrtc-android"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "The mcrtc tunnel core for the Android app, exposed to Kotlin through UniFFI"
 publish = false
 
 [lib]
 name = "mcrtc_android"
-# cdylib for the app, lib for the tests and the bindgen binary.
+# cdylib for the app, lib for the tests.
 crate-type = ["cdylib", "lib"]
-
-[[bin]]
-name = "uniffi-bindgen"
-path = "src/bin/uniffi-bindgen.rs"
+doctest = false
 
 [dependencies]
 mcrtc = { path = "../..", default-features = false }
-anyhow = "1.0.104"
-tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync", "time"] }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-uniffi = { version = "0.32.2", features = ["cli"] }
+anyhow.workspace = true
+# The runtime builder; everything else comes through mcrtc.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing-subscriber.workspace = true
+# Scaffolding only. The bindings generator is the `mcrtc-bindgen` crate next door.
+uniffi.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
 paranoid-android = "0.2.2"
 
 [dev-dependencies]
-tokio = { version = "1.54.1", features = ["full"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time"] }

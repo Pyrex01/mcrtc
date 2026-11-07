@@ -1,14 +1,17 @@
 import java.util.Properties
-import org.gradle.internal.os.OperatingSystem
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
 
+/** One NDK for cargo-ndk, the fallback lookup below and the Android Gradle plugin's strip step. */
+val rustNdkVersion = "28.2.13676358"
+
 android {
     namespace = "dev.mcrtc"
     compileSdk = 36
+    ndkVersion = rustNdkVersion
 
     defaultConfig {
         applicationId = "dev.mcrtc"
@@ -48,11 +51,6 @@ android {
             kotlin.directories.add("build/generated/uniffi")
         }
     }
-
-    packaging {
-        // The .so files are already stripped by the Rust release profile.
-        jniLibs.keepDebugSymbols += "**/libmcrtc_android.so"
-    }
 }
 
 dependencies {
@@ -88,7 +86,7 @@ val localProperties = Properties().apply {
 val ndkHome: String = localProperties.getProperty("ndk.dir")
     ?: System.getenv("ANDROID_NDK_HOME")
     ?: listOfNotNull(localProperties.getProperty("sdk.dir"), System.getenv("ANDROID_HOME"))
-        .map { File(it, "ndk/28.2.13676358") }
+        .map { File(it, "ndk/$rustNdkVersion") }
         .firstOrNull { it.isDirectory }?.path
     ?: ""
 
@@ -100,6 +98,13 @@ val rustSources = files(
     File(repoRoot, "android/rust/Cargo.toml"),
     File(repoRoot, "android/rust/uniffi.toml"),
     File(repoRoot, "android/rust/src"),
+)
+
+val androidLibrary = rustJniLibs.map { it.file("arm64-v8a/libmcrtc_android.so") }
+val bindingsFile = uniffiOut.map { it.file("dev/mcrtc/core/mcrtc_android.kt") }
+val bindgenSources = files(
+    File(repoRoot, "android/bindgen/Cargo.toml"),
+    File(repoRoot, "android/bindgen/src"),
 )
 
 val cargoBuild = tasks.register<Exec>("cargoBuild") {
@@ -114,53 +119,44 @@ val cargoBuild = tasks.register<Exec>("cargoBuild") {
         "-t", "arm64-v8a",
         "-P", "24",
         "-o", rustJniLibs.get().asFile.path,
-        // Always optimized: unoptimized crypto is far too slow to hold a connection.
-        "build", "--release", "-p", "mcrtc-android", "--lib",
+        // Always optimized: unoptimized crypto is far too slow to hold a connection. The android
+        // profile is release plus the symbol table generateBindings reads; the Android Gradle
+        // plugin strips the copy that goes into the APK.
+        "build", "--profile", "android", "-p", "mcrtc-android", "--lib",
     )
+    // Local copies: a closure that reaches for script values cannot go in the configuration cache.
+    val skip = skipRust
+    val library = androidLibrary
+    val ndk = ndkHome
     onlyIf("skipRust is not set, or there is nothing to reuse") {
-        !skipRust || !rustJniLibs.get().asFile.resolve("arm64-v8a/libmcrtc_android.so").exists()
+        !skip || !library.get().asFile.exists()
     }
     doFirst {
-        require(ndkHome.isNotEmpty()) {
+        require(ndk.isNotEmpty()) {
             "No Android NDK found: set ndk.dir in local.properties or ANDROID_NDK_HOME"
         }
-    }
-}
-
-// Release libraries are stripped, so the bindings come from an unstripped host build.
-val hostLibrary: String = when {
-    OperatingSystem.current().isWindows -> "mcrtc_android.dll"
-    OperatingSystem.current().isMacOsX -> "libmcrtc_android.dylib"
-    else -> "libmcrtc_android.so"
-}
-val bindingsFile = uniffiOut.map { it.file("dev/mcrtc/core/mcrtc_android.kt") }
-
-val cargoBuildHost = tasks.register<Exec>("cargoBuildHost") {
-    description = "Builds the Rust core for this computer, for generating the bindings."
-    group = "rust"
-    inputs.files(rustSources)
-    outputs.file(File(repoRoot, "target/debug/$hostLibrary"))
-    workingDir = repoRoot
-    commandLine("cargo", "build", "-p", "mcrtc-android", "--lib")
-    onlyIf("skipRust is not set, or there is nothing to reuse") {
-        !skipRust || !bindingsFile.get().asFile.exists()
     }
 }
 
 val generateBindings = tasks.register<Exec>("generateBindings") {
     description = "Generates the Kotlin bindings for the Rust core with UniFFI."
     group = "rust"
-    dependsOn(cargoBuildHost)
-    inputs.files(File(repoRoot, "target/debug/$hostLibrary"))
+    // The bindings come from the phone library itself, so nothing is built for this computer.
+    inputs.files(cargoBuild)
+    inputs.files(bindgenSources)
+    inputs.file(File(repoRoot, "android/rust/uniffi.toml"))
     outputs.dir(uniffiOut)
     workingDir = repoRoot
     commandLine(
-        "cargo", "run", "-p", "mcrtc-android", "--bin", "uniffi-bindgen", "--",
-        "generate", "--library", "target/debug/$hostLibrary",
-        "--language", "kotlin", "--out-dir", uniffiOut.get().asFile.path, "--no-format",
+        "cargo", "run", "-p", "mcrtc-bindgen", "--",
+        "generate", "--library", androidLibrary.get().asFile.path,
+        "--language", "kotlin", "--out-dir", uniffiOut.get().asFile.path,
+        "--no-format", "--metadata-no-deps",
     )
+    val skip = skipRust
+    val bindings = bindingsFile
     onlyIf("skipRust is not set, or there is nothing to reuse") {
-        !skipRust || !bindingsFile.get().asFile.exists()
+        !skip || !bindings.get().asFile.exists()
     }
 }
 

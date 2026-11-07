@@ -2327,8 +2327,14 @@ dependencies = [
  "mcrtc",
  "paranoid-android",
  "tokio",
- "tracing",
  "tracing-subscriber",
+ "uniffi",
+]
+
+[[package]]
+name = "mcrtc-bindgen"
+version = "0.1.0"
+dependencies = [
  "uniffi",
 ]
 
@@ -4366,7 +4372,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
