@@ -19,6 +19,24 @@ a PC to run it on; consoles cannot run it.
 > **Warning:** invites and replies contain your IP addresses. Only share them with people you
 > trust, and do not post them publicly.
 
+## Android app build
+
+The Android app lives under `android/` and uses the project Gradle wrapper. Use Java 17 and the
+Android SDK before running a build:
+
+```sh
+export ANDROID_HOME="$HOME/Android/Sdk"
+export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
+export JAVA_HOME="/home/riyan-khan/.sdkman/candidates/java/17.0.21.0+10-amzn"
+export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+cd android
+./gradlew assembleDebug
+```
+
+The wrapper is pinned to Gradle 8.9, which matches the Android Gradle Plugin version in
+`android/build.gradle.kts` and avoids the plugin-resolution stall caused by using a newer Gradle
+release with AGP 8.7.3.
+
 ## Quick start with the interface
 
 Run `mcrtc` with no arguments, or double-click it. A native window opens, drawn like Minecraft's
