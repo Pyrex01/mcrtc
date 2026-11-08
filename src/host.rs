@@ -18,6 +18,7 @@ use crate::control::{self, channel_label, stream_id, ControlEnd, Role};
 use crate::events::{Event, Reporter};
 use crate::invite::{sdp_fingerprints, Payload, PayloadType, DEFAULT_TTL};
 use crate::peer::{ChannelHandler, Peer, PeerOptions};
+use crate::sync::{self, SyncOptions};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -31,6 +32,7 @@ pub struct HostOptions {
     pub whitelist: Option<HashSet<String>>,
     pub raw_json: bool,
     pub reporter: Reporter,
+    pub sync: Option<SyncOptions>,
 }
 
 /// Turns the friend's `open` requests into connections to the Minecraft server.
@@ -42,6 +44,7 @@ pub struct Tunnel {
     pub max_connections: Option<usize>,
     pub label: String,
     pub connections: Counter,
+    pub sync: Option<SyncOptions>,
 }
 
 impl Tunnel {
@@ -66,6 +69,24 @@ impl Tunnel {
         debug!(peer = %self.label, channel = %channel_name, "connection opened");
         bridge(stream, channel).await;
         debug!(peer = %self.label, channel = %channel_name, "connection closed");
+    }
+
+    pub async fn publish_snapshot(&self) {
+        let Some(options) = self.sync.clone() else {
+            return;
+        };
+        let Ok(snapshot) = sync::create_snapshot(&options).await else {
+            return;
+        };
+        let label = format!("mcrtc-sync-{}", snapshot.header.generation);
+        match self.peer.create_channel(&label).await {
+            Ok(channel) => {
+                if let Err(error) = sync::send_snapshot(channel, snapshot).await {
+                    warn!(peer = %self.label, %error, "world sync failed");
+                }
+            }
+            Err(error) => warn!(peer = %self.label, %error, "could not open world sync channel"),
+        }
     }
 
     async fn open(&self, label: &str, id: u64) -> Option<(TcpStream, Arc<dyn DataChannel>)> {
@@ -163,14 +184,25 @@ async fn supervise(session: Session, shutdown: watch::Receiver<bool>, reporter: 
         measured,
         reporter.clone(),
     );
+    let sync_interval = tunnel
+        .sync
+        .as_ref()
+        .map(|options| Duration::from_secs(options.interval_secs.max(1)));
+    let mut sync_tick = sync_interval.map(tokio::time::interval);
     let reason = tokio::select! {
-        end = control::run(control, tunnel.role(), shutdown, rtt) => match end {
+        end = control::run(control, tunnel.clone().role(), shutdown, rtt) => match end {
             ControlEnd::PeerLeft => Some("left".to_owned()),
             ControlEnd::Closed => Some("disconnected".to_owned()),
             ControlEnd::TimedOut => Some("timed out".to_owned()),
             ControlEnd::Shutdown => None,
         },
         state = peer.wait_lost() => Some(format!("disconnected ({state})")),
+        _ = async {
+            match sync_tick.as_mut() {
+                Some(tick) => loop { tick.tick().await; tunnel.publish_snapshot().await; },
+                None => std::future::pending::<()>().await,
+            }
+        } => None,
         () = stats => None,
     };
     if let Some(reason) = reason {
@@ -322,6 +354,7 @@ async fn invite(
                 max_connections: options.max_connections,
                 label,
                 connections: Counter::default(),
+                sync: options.sync.clone(),
             };
             let slot = peers.acquire();
             Ok(Attempt::Connected(Session { tunnel, slot }, route))

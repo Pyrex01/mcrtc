@@ -9,6 +9,11 @@
 # max_connections = 16         # host: TCP connections per friend
 # whitelist_file = "ids.txt"   # host: allowed mcrtc IDs
 # identity = "mcrtc-id.pem"    # join: keeps your mcrtc ID stable
+# world_path = "./world"        # host: source world directory; enables sync
+# sync_path = "./synced-world"  # join: destination for host snapshots
+# sync_interval_secs = 300       # host: snapshot interval
+# rcon_address = "127.0.0.1:25575"
+# rcon_password = "secret"
 
 # [[turn]]
 # url = "turn:turn.example.com:3478?transport=udp"

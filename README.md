@@ -94,7 +94,7 @@ mcrtc                                    Open the interface
 mcrtc ui
 mcrtc host [--server 127.0.0.1:25565] [--whitelist-file ids.txt]
            [--max-peers N] [--max-connections N]
-mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem]
+mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem] [--sync-path ./world]
 
 Common: --config mcrtc.toml, --stun <url> (repeatable),
         --turn <url> --turn-user <u> --turn-pass <p>, --raw-json, -v
@@ -103,6 +103,12 @@ Common: --config mcrtc.toml, --stun <url> (repeatable),
 `--raw-json` prints plain JSON instead of the `mcrtc1:` string. Either form is accepted when
 pasting; end a JSON paste with a blank line. See [mcrtc.example.toml](mcrtc.example.toml) for the
 config file. Flags win over the file.
+
+World synchronization is opt-in. Start the host with `--world <directory>` and configure RCON
+with `--rcon-address` and `--rcon-password`; joiners use `--sync-path <directory>`. The host sends
+compressed, checksummed snapshots over the encrypted WebRTC connection. Existing joiner worlds are
+backed up before replacement. If the host disappears, the session closes and a joiner with the
+latest snapshot can start its own Minecraft server from that local copy.
 
 The default STUN servers are `stun:stun.l.google.com:19302` and `stun:stun.cloudflare.com:3478`.
 

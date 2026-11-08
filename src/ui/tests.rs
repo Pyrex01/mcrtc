@@ -28,6 +28,8 @@ fn options(server: String, listen: String) -> UiOptions {
         max_peers: None,
         max_connections: None,
         whitelist: None,
+        sync: None,
+        sync_path: None,
     }
 }
 

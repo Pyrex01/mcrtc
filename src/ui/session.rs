@@ -16,6 +16,7 @@ use crate::events::{Event, Reporter};
 use crate::host::{self, HostOptions};
 use crate::join::{self, JoinOptions};
 use crate::peer::PeerOptions;
+use crate::sync::SyncOptions;
 
 const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -26,6 +27,8 @@ pub struct UiOptions {
     pub max_peers: Option<usize>,
     pub max_connections: Option<usize>,
     pub whitelist: Option<HashSet<String>>,
+    pub sync: Option<SyncOptions>,
+    pub sync_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +48,11 @@ pub struct Settings {
     pub turn_url: String,
     pub turn_user: String,
     pub turn_pass: String,
+    pub world_path: String,
+    pub sync_path: String,
+    pub sync_interval: String,
+    pub rcon_address: String,
+    pub rcon_password: String,
 }
 
 struct Session {
@@ -86,6 +94,17 @@ impl Sessions {
 
     pub fn default_listen(&self) -> &str {
         &self.options.listen
+    }
+
+    pub fn default_world_path(&self) -> Option<&std::path::Path> {
+        self.options
+            .sync
+            .as_ref()
+            .map(|sync| sync.world_path.as_path())
+    }
+
+    pub fn default_sync_path(&self) -> Option<&std::path::Path> {
+        self.options.sync_path.as_deref()
     }
 
     fn resolve_ice(&self, settings: &Settings) -> Result<IceConfig> {
@@ -145,6 +164,26 @@ impl Sessions {
         let max_peers = settings.max_peers.or(self.options.max_peers);
         let max_connections = settings.max_connections.or(self.options.max_connections);
         let whitelist = self.options.whitelist.clone();
+        let configured_sync = self.options.sync.clone();
+        let sync = if settings.world_path.trim().is_empty() {
+            configured_sync
+        } else {
+            let base = configured_sync.unwrap_or(SyncOptions {
+                world_path: settings.world_path.trim().into(),
+                interval_secs: 300,
+                rcon_address: None,
+                rcon_password: None,
+            });
+            Some(SyncOptions {
+                world_path: settings.world_path.trim().into(),
+                interval_secs: positive_u64(&settings.sync_interval).unwrap_or(base.interval_secs),
+                rcon_address: nonempty(&settings.rcon_address).or(base.rcon_address),
+                rcon_password: nonempty(&settings.rcon_password).or(base.rcon_password),
+            })
+        };
+        let sync_path = nonempty(&settings.sync_path)
+            .map(Into::into)
+            .or(self.options.sync_path.clone());
         let running = self.session.clone();
         self.runtime.spawn(async move {
             let result = match mode {
@@ -157,6 +196,7 @@ impl Sessions {
                         whitelist,
                         raw_json: false,
                         reporter: reporter.clone(),
+                        sync,
                     };
                     host::run(options, console, stopped).await
                 }
@@ -166,6 +206,7 @@ impl Sessions {
                         listen,
                         raw_json: false,
                         reporter: reporter.clone(),
+                        sync_path,
                     };
                     join::run(options, console, stopped).await
                 }
@@ -214,4 +255,12 @@ impl Sessions {
             .runtime
             .block_on(async { timeout(SESSION_STOP_TIMEOUT, stopped).await });
     }
+}
+
+fn nonempty(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.trim().to_owned())
+}
+
+fn positive_u64(text: &str) -> Option<u64> {
+    text.trim().parse().ok().filter(|value| *value > 0)
 }
