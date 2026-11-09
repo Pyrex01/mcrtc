@@ -75,8 +75,13 @@ impl Tunnel {
         let Some(options) = self.sync.clone() else {
             return;
         };
-        let Ok(snapshot) = sync::create_snapshot(&options).await else {
-            return;
+        info!(peer = %self.label, world = %options.world_path.display(), "creating world snapshot");
+        let snapshot = match sync::create_snapshot(&options).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warn!(peer = %self.label, %error, "could not create world snapshot");
+                return;
+            }
         };
         let label = format!("mcrtc-sync-{}", snapshot.header.generation);
         match self.peer.create_channel(&label).await {
