@@ -66,16 +66,22 @@ enum Command {
         /// Maximum number of connections per friend
         #[arg(long, value_name = "N")]
         max_connections: Option<usize>,
-        /// Enable world snapshots from this directory.
+
+        /// Let friends keep a copy of this Java world, or of the server folder's world
         #[arg(long, value_name = "DIR")]
         world: Option<PathBuf>,
-        /// RCON address used to flush saves before snapshots.
-        #[arg(long, value_name = "ADDR")]
-        rcon_address: Option<String>,
-        #[arg(long, value_name = "PASSWORD")]
-        rcon_password: Option<String>,
+
+        /// Seconds between world snapshots [default: 300]
         #[arg(long, value_name = "SECONDS")]
         sync_interval: Option<u64>,
+
+        /// RCON address for pausing saves [default: from server.properties, or 127.0.0.1:25575]
+        #[arg(long, value_name = "ADDR")]
+        rcon_address: Option<String>,
+
+        /// RCON password [default: from server.properties]
+        #[arg(long, value_name = "PASS")]
+        rcon_password: Option<String>,
     },
     /// Open the graphical interface
     Ui,
@@ -88,7 +94,8 @@ enum Command {
         /// Keep a stable mcrtc ID in this file, created on first use
         #[arg(long, value_name = "FILE")]
         identity: Option<PathBuf>,
-        /// Install received world snapshots here.
+
+        /// Keep a copy of the host's world in this folder
         #[arg(long, value_name = "DIR")]
         sync_path: Option<PathBuf>,
     },
@@ -123,6 +130,23 @@ fn spawn_ctrl_c() -> watch::Receiver<bool> {
     rx
 }
 
+fn sync_options(
+    world: Option<PathBuf>,
+    interval: Option<u64>,
+    rcon_address: Option<String>,
+    rcon_password: Option<String>,
+    file: &FileConfig,
+) -> Option<SyncOptions> {
+    Some(SyncOptions {
+        world_path: world.or_else(|| file.world.clone())?,
+        interval_secs: interval
+            .or(file.sync_interval)
+            .unwrap_or(sync::DEFAULT_INTERVAL_SECS),
+        rcon_address: rcon_address.or_else(|| file.rcon_address.clone()),
+        rcon_password: rcon_password.or_else(|| file.rcon_password.clone()),
+    })
+}
+
 fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
     let _entered = runtime.enter();
     let file = match &cli.common.config {
@@ -142,6 +166,8 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                 peer.certificate = Some(load_or_create_identity(path)?);
             }
             let options = UiOptions {
+                sync: sync_options(None, None, None, None, &file),
+                sync_path: file.sync_path.clone(),
                 peer,
                 edition,
                 server: file.server.unwrap_or_else(|| default_address.clone()),
@@ -153,13 +179,6 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                     .as_deref()
                     .map(load_whitelist)
                     .transpose()?,
-                sync: file.world_path.clone().map(|world_path| SyncOptions {
-                    world_path,
-                    interval_secs: file.sync_interval_secs.unwrap_or(300),
-                    rcon_address: file.rcon_address.clone(),
-                    rcon_password: file.rcon_password.clone(),
-                }),
-                sync_path: file.sync_path.clone(),
             };
             ui::run(options, runtime.handle().clone(), spawn_ctrl_c())
         }
@@ -169,10 +188,11 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             max_peers,
             max_connections,
             world,
+            sync_interval,
             rcon_address,
             rcon_password,
-            sync_interval,
         } => {
+            let sync = sync_options(world, sync_interval, rcon_address, rcon_password, &file);
             let whitelist_file = whitelist_file.or(file.whitelist_file);
             let options = HostOptions {
                 peer,
@@ -183,12 +203,7 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                 whitelist: whitelist_file.as_deref().map(load_whitelist).transpose()?,
                 raw_json,
                 reporter: Reporter::terminal(),
-                sync: world.or(file.world_path).map(|world_path| SyncOptions {
-                    world_path,
-                    interval_secs: sync_interval.or(file.sync_interval_secs).unwrap_or(300),
-                    rcon_address: rcon_address.or(file.rcon_address),
-                    rcon_password: rcon_password.or(file.rcon_password),
-                }),
+                sync,
             };
             runtime.block_on(host::run(options, Console::from_stdin(), spawn_ctrl_c()))
         }

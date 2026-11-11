@@ -1,35 +1,49 @@
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 
-android { namespace = "com.mcrtc.android"; compileSdk = 35
+android {
+    namespace = "com.mcrtc.android"
+    compileSdk = 35
     defaultConfig {
-        applicationId = "com.mcrtc.android"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.1.0"
-        // A universal/fat APK: Gradle keeps each native library under its ABI directory.
+        applicationId = "com.mcrtc.android"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 4
+        versionName = "0.3.0"
+        // One universal APK: libwebrtc ships a native library for each of these.
         ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86") }
     }
-    sourceSets["main"].jniLibs.srcDir("src/main/jniLibs")
+    // Release builds are signed with the keystore CI is given; without one they fall back to
+    // the debug key so the APK still installs.
+    val keystore = System.getenv("MCRTC_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (keystore != null) create("release") {
+            storeFile = keystore
+            storePassword = System.getenv("MCRTC_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("MCRTC_KEY_ALIAS")
+            keyPassword = System.getenv("MCRTC_KEY_PASSWORD")
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+        }
+    }
+    // The desktop app's Monocraft font, so both frontends draw the same letters.
+    sourceSets["main"].assets.srcDir("../../assets/ui")
+    buildFeatures { buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
 
-val androidAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
-
-// Build and package all Rust ABIs with one universal APK when cargo-ndk is installed:
-//   MCRTC_BUILD_NATIVE=1 ./gradlew assembleFatDebug
-// Keeping this opt-in lets resource-only Android checks run on machines without the NDK.
-val buildRustAndroid = tasks.register<Exec>("buildRustAndroid") {
-    workingDir(rootProject.projectDir.parentFile)
-    commandLine(
-        listOf("cargo", "ndk") + androidAbis.flatMap { listOf("-t", it) } +
-            listOf("-o", "android/app/src/main/jniLibs", "build", "--release", "-p", "mcrtc-android")
-    )
+dependencies {
+    implementation("io.github.webrtc-sdk:android:144.7559.15")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    testImplementation("junit:junit:4.13.2")
+    // Android's own org.json is only a stub in JVM unit tests.
+    testImplementation("org.json:json:20240303")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
 }
-if (providers.environmentVariable("MCRTC_BUILD_NATIVE").isPresent) {
-    tasks.named("preBuild") { dependsOn(buildRustAndroid) }
-}
-
-tasks.register("assembleFatDebug") { dependsOn("assembleDebug") }
-tasks.register("assembleFatRelease") { dependsOn("assembleRelease") }
 
 kotlin { jvmToolchain(17) }

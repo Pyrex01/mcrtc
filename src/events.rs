@@ -1,34 +1,9 @@
 //! What the host and join flows have to say, independent of how it reaches a person.
 
-use serde::Serialize;
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Started {
-        mode: String,
-    },
-    InviteReady {
-        label: String,
-        text: String,
-    },
-    ReplyReady {
-        text: String,
-    },
-    WaitingForReply,
-    Connected {
-        route: String,
-        address: String,
-    },
-    FriendUpdated {
-        name: String,
-        connections: usize,
-        ping_ms: Option<u64>,
-    },
-    Failed {
-        message: String,
-    },
-    Stopped,
     Hosting {
         server: String,
     },
@@ -91,6 +66,11 @@ pub enum Event {
     Left {
         reason: String,
     },
+    /// The local copy of the host's world caught up.
+    WorldSynced {
+        files: usize,
+        bytes: u64,
+    },
 
     SessionEnded {
         error: Option<String>,
@@ -139,14 +119,11 @@ impl Event {
             Event::WaitingForHost => "Waiting for the host to paste it...".to_owned(),
             Event::Joined { address, .. } => format!("Connected! Point Minecraft at {address}."),
             Event::Left { reason } => reason.clone(),
-            Event::Started { mode } => format!("Started {mode}"),
-            Event::InviteReady { label, text } => format!("Invite for {label}: {text}"),
-            Event::ReplyReady { text } => format!("Reply: {text}"),
-            Event::WaitingForReply => "Waiting for reply...".to_owned(),
-            Event::Connected { address, .. } => format!("Connected! Point Minecraft at {address}."),
-            Event::FriendUpdated { .. } => return None,
-            Event::Failed { message } => format!("Failed: {message}"),
-            Event::Stopped => "Stopped.".to_owned(),
+            Event::WorldSynced { files: 0, .. } => "World copy is up to date.".to_owned(),
+            Event::WorldSynced { files, bytes } => format!(
+                "World copy updated: {files} files, {:.1} MB.",
+                *bytes as f64 / 1_000_000.0
+            ),
         })
     }
 }

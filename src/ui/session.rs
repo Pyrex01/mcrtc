@@ -2,6 +2,7 @@
 //! through a [`Console`] and [`Event`]s come out on a channel the window drains every frame.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -30,8 +31,9 @@ pub struct UiOptions {
     pub max_peers: Option<usize>,
     pub max_connections: Option<usize>,
     pub whitelist: Option<HashSet<String>>,
+    /// From the config file. The window's folder fields override the folders.
     pub sync: Option<SyncOptions>,
-    pub sync_path: Option<std::path::PathBuf>,
+    pub sync_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,11 +54,8 @@ pub struct Settings {
     pub turn_url: String,
     pub turn_user: String,
     pub turn_pass: String,
-    pub world_path: String,
+    pub world: String,
     pub sync_path: String,
-    pub sync_interval: String,
-    pub rcon_address: String,
-    pub rcon_password: String,
 }
 
 struct Session {
@@ -112,7 +111,7 @@ impl Sessions {
         }
     }
 
-    pub fn default_world_path(&self) -> Option<&std::path::Path> {
+    pub fn default_world(&self) -> Option<&std::path::Path> {
         self.options
             .sync
             .as_ref()
@@ -181,26 +180,22 @@ impl Sessions {
         let max_peers = settings.max_peers.or(self.options.max_peers);
         let max_connections = settings.max_connections.or(self.options.max_connections);
         let whitelist = self.options.whitelist.clone();
-        let configured_sync = self.options.sync.clone();
-        let sync = if settings.world_path.trim().is_empty() {
-            configured_sync
-        } else {
-            let base = configured_sync.unwrap_or(SyncOptions {
-                world_path: settings.world_path.trim().into(),
-                interval_secs: 300,
-                rcon_address: None,
-                rcon_password: None,
-            });
-            Some(SyncOptions {
-                world_path: settings.world_path.trim().into(),
-                interval_secs: positive_u64(&settings.sync_interval).unwrap_or(base.interval_secs),
-                rcon_address: nonempty(&settings.rcon_address).or(base.rcon_address),
-                rcon_password: nonempty(&settings.rcon_password).or(base.rcon_password),
-            })
+        let sync = match settings.world.trim() {
+            "" => self.options.sync.clone(),
+            world => Some(SyncOptions {
+                world_path: world.into(),
+                ..self.options.sync.clone().unwrap_or(SyncOptions {
+                    world_path: PathBuf::new(),
+                    interval_secs: crate::sync::DEFAULT_INTERVAL_SECS,
+                    rcon_address: None,
+                    rcon_password: None,
+                })
+            }),
         };
-        let sync_path = nonempty(&settings.sync_path)
-            .map(Into::into)
-            .or(self.options.sync_path.clone());
+        let sync_path = match settings.sync_path.trim() {
+            "" => self.options.sync_path.clone(),
+            path => Some(path.into()),
+        };
         let running = self.session.clone();
         self.runtime.spawn(async move {
             let result = match mode {
@@ -274,12 +269,4 @@ impl Sessions {
             .runtime
             .block_on(async { timeout(SESSION_STOP_TIMEOUT, stopped).await });
     }
-}
-
-fn nonempty(text: &str) -> Option<String> {
-    (!text.trim().is_empty()).then(|| text.trim().to_owned())
-}
-
-fn positive_u64(text: &str) -> Option<u64> {
-    text.trim().parse().ok().filter(|value| *value > 0)
 }

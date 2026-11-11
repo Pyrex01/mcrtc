@@ -23,6 +23,8 @@ const PONG: &str = "pong";
 const BYE: &str = "bye";
 const OPEN: &str = "open";
 const OPEN_DATAGRAMS: &str = "open-datagrams";
+/// The joiner asks for the host's world. Hosts that do not share one never answer.
+const OPEN_WORLD: &str = "open-world";
 const READY: &str = "ready";
 const REFUSED: &str = "refused";
 
@@ -37,8 +39,9 @@ const BYE_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How many stream IDs tunnel channels rotate through. Even IDs from 2 up; `control` is announced
-/// with DCEP and takes the lowest free ID of the host's DTLS role, which is 0 or 1.
-const STREAM_ID_COUNT: u64 = 30_000;
+/// with DCEP and takes the lowest free ID of the host's DTLS role, which is 0 or 1. libwebrtc, which
+/// the Android app uses, negotiates only 1024 SCTP streams, so every ID has to stay below that.
+const STREAM_ID_COUNT: u64 = 500;
 
 /// The stream ID of tunnel connection `id`.
 pub fn stream_id(id: u64) -> u16 {
@@ -54,6 +57,8 @@ pub fn channel_label(id: u64) -> String {
 pub enum Transport {
     Stream,
     Datagrams,
+    /// The world sync channel, see [`crate::sync`].
+    World,
 }
 
 impl Transport {
@@ -61,6 +66,7 @@ impl Transport {
         match self {
             Self::Stream => OPEN,
             Self::Datagrams => OPEN_DATAGRAMS,
+            Self::World => OPEN_WORLD,
         }
     }
 }
@@ -130,6 +136,7 @@ impl Role {
         match (self, word) {
             (Role::Host(on_open), OPEN) => on_open(id, Transport::Stream),
             (Role::Host(on_open), OPEN_DATAGRAMS) => on_open(id, Transport::Datagrams),
+            (Role::Host(on_open), OPEN_WORLD) => on_open(id, Transport::World),
             (Role::Joiner(pending), READY) => pending.resolve(id, true),
             (Role::Joiner(pending), REFUSED) => pending.resolve(id, false),
             _ => debug!(word, "ignoring unexpected control message"),
@@ -249,7 +256,7 @@ mod tests {
         assert_eq!(stream_id(0), 2);
         assert_eq!(stream_id(1), 4);
         assert_eq!(stream_id(STREAM_ID_COUNT), stream_id(0));
-        assert!((0..STREAM_ID_COUNT * 2).all(|id| stream_id(id) >= 2 && stream_id(id) < 60_004));
+        assert!((0..STREAM_ID_COUNT * 2).all(|id| stream_id(id) >= 2 && stream_id(id) < 1024));
     }
 
     #[test]
@@ -276,9 +283,14 @@ mod tests {
         }));
         role.handle("open 3");
         role.handle("open-datagrams 6");
+        role.handle("open-world 18446744073709551615");
         role.handle("ready 4");
         joiner_role().handle("open 5");
-        let expected = [(3, Transport::Stream), (6, Transport::Datagrams)];
+        let expected = [
+            (3, Transport::Stream),
+            (6, Transport::Datagrams),
+            (u64::MAX, Transport::World),
+        ];
         assert_eq!(*seen.lock().unwrap(), expected);
     }
 

@@ -438,11 +438,7 @@ impl App {
     fn host_setup(&mut self, ui: &mut Ui) {
         let edition = self.state.forms.edition;
         let default_server = self.sessions.default_server(edition).to_owned();
-        let default_world = self
-            .sessions
-            .default_world_path()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
+        let default_world = folder_hint(self.sessions.default_world());
         self.page(
             ui,
             "Host a Server",
@@ -473,52 +469,21 @@ impl App {
                         |edit| edit,
                     );
                 });
-                widgets::field(
-                    ui,
-                    "World Folder (optional)",
-                    &mut forms.world_path,
-                    if default_world.is_empty() {
-                        "Disabled"
-                    } else {
-                        &default_world
-                    },
-                    |edit| edit,
-                );
-                halves(ui, |left, right| {
+                if edition == Edition::Java {
                     widgets::field(
-                        left,
-                        "RCON Address",
-                        &mut forms.rcon_address,
-                        "127.0.0.1:25575",
+                        ui,
+                        "World Folder to Share (optional)",
+                        &mut forms.world,
+                        &default_world,
                         |edit| edit,
                     );
-                    widgets::field(
-                        right,
-                        "RCON Password",
-                        &mut forms.rcon_password,
-                        "Optional",
-                        |edit| edit.password(true),
-                    );
-                });
-                widgets::field(
-                    ui,
-                    "Sync Interval (seconds)",
-                    &mut forms.sync_interval,
-                    "300",
-                    |edit| edit,
-                );
+                }
                 widgets::gap(ui, GAP);
                 let hint = format!(
                     "Start your {} server first, then press Start Hosting.",
                     edition.name()
                 );
                 widgets::paragraph(ui, &hint, MUTED, Align::Min);
-                widgets::paragraph(
-                    ui,
-                    "World sync uses RCON to flush saves before sending snapshots.",
-                    MUTED,
-                    Align::Min,
-                );
             },
             |app, ui| {
                 let half = (COLUMN - GAP) / 2.0;
@@ -651,11 +616,7 @@ impl App {
     fn join_setup(&mut self, ui: &mut Ui) {
         let edition = self.state.forms.edition;
         let default_listen = self.sessions.default_listen(edition).to_owned();
-        let default_sync = self
-            .sessions
-            .default_sync_path()
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
+        let default_sync = folder_hint(self.sessions.default_sync_path());
         self.page(
             ui,
             "Join a Friend",
@@ -677,17 +638,15 @@ impl App {
                     &default_listen,
                     |edit| edit,
                 );
-                widgets::field(
-                    ui,
-                    "World Destination (optional)",
-                    &mut forms.sync_path,
-                    if default_sync.is_empty() {
-                        "Disabled"
-                    } else {
-                        &default_sync
-                    },
-                    |edit| edit,
-                );
+                if edition == Edition::Java {
+                    widgets::field(
+                        ui,
+                        "Keep a Copy of the World In (optional)",
+                        &mut forms.sync_path,
+                        &default_sync,
+                        |edit| edit,
+                    );
+                }
                 if !app.state.error.is_empty() {
                     widgets::paragraph(ui, &app.state.error, RED, Align::Min);
                 }
@@ -755,6 +714,9 @@ impl App {
                 widgets::list_entry(ui, &app.theme, "Host", &detail, joined.ping);
                 if let Some(route) = describe_route(joined.route.as_deref()) {
                     widgets::paragraph(ui, route, MUTED, Align::Center);
+                }
+                if let Some(world) = &joined.world {
+                    widgets::paragraph(ui, world, MUTED, Align::Center);
                 }
             },
             |app, ui| {
@@ -857,6 +819,10 @@ fn centered_column(ui: &mut Ui, screen: Rect, width: f32, top: f32) -> Ui {
 }
 
 /// Two columns side by side, for fields that come in pairs.
+fn folder_hint(path: Option<&std::path::Path>) -> String {
+    path.map_or("Not shared".to_owned(), |path| path.display().to_string())
+}
+
 fn halves(ui: &mut Ui, add: impl FnOnce(&mut Ui, &mut Ui)) {
     let width = (ui.available_width() - GAP) / 2.0;
     let top = ui.cursor().min;

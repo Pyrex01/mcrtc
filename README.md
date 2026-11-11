@@ -19,23 +19,29 @@ a PC to run it on; consoles cannot run it.
 > **Warning:** invites and replies contain your IP addresses. Only share them with people you
 > trust, and do not post them publicly.
 
-## Android app build
+## Android app
 
-The Android app lives under `android/` and uses the project Gradle wrapper. Use Java 17 and the
-Android SDK before running a build:
+`android/` holds a Kotlin app that hosts or joins from a phone, Java Edition only. It draws the
+same Minecraft-style menus as the desktop window, with the same Monocraft font and procedural
+textures. Its networking is a Kotlin port of the desktop flows (invites, the control channel and
+the TCP bridge) on top of Google's libwebrtc (`io.github.webrtc-sdk:android`), so it needs no Rust
+toolchain, and phones and PCs can invite each other.
+
+Build it with Java 17 and the Android SDK:
 
 ```sh
 export ANDROID_HOME="$HOME/Android/Sdk"
-export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
-export JAVA_HOME="/home/riyan-khan/.sdkman/candidates/java/17.0.21.0+10-amzn"
-export PATH="$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+export JAVA_HOME="/path/to/java-17"
 cd android
-./gradlew assembleDebug
+./gradlew assembleDebug        # app/build/outputs/apk/debug/app-debug.apk, all four ABIs
+./gradlew testDebugUnitTest    # invite format, candidate trimming, stream IDs, screen state
 ```
 
 The wrapper is pinned to Gradle 8.9, which matches the Android Gradle Plugin version in
-`android/build.gradle.kts` and avoids the plugin-resolution stall caused by using a newer Gradle
-release with AGP 8.7.3.
+`android/build.gradle.kts`.
+
+While a session runs, a notification keeps the tunnel alive in the background, so you can switch
+to Minecraft. When joining, point Minecraft on the phone at `127.0.0.1:25565`.
 
 ## Quick start with the interface
 
@@ -125,7 +131,8 @@ mcrtc                                    Open the interface
 mcrtc ui
 mcrtc host [--server 127.0.0.1:25565] [--whitelist-file ids.txt]
            [--max-peers N] [--max-connections N]
-mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem] [--sync-path ./world]
+           [--world ./world] [--sync-interval 300] [--rcon-address ADDR] [--rcon-password PASS]
+mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem] [--sync-path ./host-world]
 
 Common: --edition java|bedrock, --config mcrtc.toml, --stun <url> (repeatable),
         --turn <url> --turn-user <u> --turn-pass <p>, --raw-json, -v
@@ -138,12 +145,6 @@ config file. Flags win over the file.
 `--server` and `--listen` default to port 25565 for Java and 19132 for Bedrock. In the interface,
 `server` and `listen` from a config file belong to the edition it starts on, which is the file's
 `edition` or `--edition`; the other edition uses its default.
-
-World synchronization is opt-in. Start the host with `--world <directory>` and configure RCON
-with `--rcon-address` and `--rcon-password`; joiners use `--sync-path <directory>`. The host sends
-compressed, checksummed snapshots over the encrypted WebRTC connection. Existing joiner worlds are
-backed up before replacement. If the host disappears, the session closes and a joiner with the
-latest snapshot can start its own Minecraft server from that local copy.
 
 The default STUN servers are `stun:stun.l.google.com:19302` and `stun:stun.cloudflare.com:3478`.
 
@@ -159,6 +160,30 @@ A reply is refused unless every fingerprint in it is listed. The DTLS handshake 
 friend owns that certificate, so an ID cannot be faked by copying it. Without `--identity`, a new
 ID is generated on every run. In the interface, set `whitelist_file` and `identity` in a config
 file and start it with `mcrtc ui --config mcrtc.toml`.
+
+## Keeping a copy of the world
+
+A Java host can let friends keep a copy of the world, so they can start their own server from it
+when the host is away. It is opt-in on both sides:
+
+1. In the host's `server.properties`, set `enable-rcon=true` and an `rcon.password`, then restart
+   the server. Keep the RCON port closed on your firewall: mcrtc only uses it on `127.0.0.1`.
+2. The host runs `mcrtc host --world <server folder or world folder>`, or fills in *World Folder
+   to Share* in the interface. RCON settings are read from `server.properties` next to the world.
+3. A friend runs `mcrtc join --sync-path ./host-world`, or fills in *Keep a Copy of the World In*.
+
+Every `--sync-interval` seconds (300 by default), while someone is syncing, mcrtc turns saving off
+over RCON, flushes the world, copies the files that changed into a hidden mirror next to the world
+folder, and turns saving back on. Friends then get only those changed files, read from the
+mirror, so the first sync sends the whole world and later ones usually a few region files. The
+copy is written to a staging folder and moved into place only once complete, so it is always one
+whole snapshot, even if mcrtc is killed halfway. If a friend's copy changed locally, for example
+because they played on it, it is moved to `<folder>.backup-<time>` and copied again in full,
+never overwritten. Without RCON, sync still works but warns that a snapshot can catch the server
+mid-save.
+
+Costs: the host's mirror takes as much disk as the world. Nothing is compressed or held in memory
+whole, and transfers keep at most 128 KB in flight so they do not delay gameplay packets.
 
 ## How it works
 
@@ -227,6 +252,8 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
   still has to cross both routers without mcrtc's help. `online-mode=false` turns the signaling
   port off, and `transport=raknet` logs that players cannot connect. A scripted RakNet handshake
   does get accepted by that server through the tunnel.
+- World sync is Java only. Bedrock servers have no RCON, so there is no safe way yet to pause
+  their saving from outside the server.
 - Consoles cannot run mcrtc. Phones and tablets cannot either, so they would need it running on a
   PC on the same network, with `--listen` set to an address they can reach.
 

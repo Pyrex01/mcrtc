@@ -17,8 +17,10 @@ use crate::bridge::{Counter, BUFFERED_HIGH};
 use crate::control::{self, PendingOpens, Role};
 use crate::datagram::test_support::{pong, pong_status, STATUS};
 use crate::edition::Edition;
+use crate::events::{Event, Reporter};
 use crate::peer::test_support::*;
 use crate::peer::{Peer, PeerOptions};
+use crate::sync::{self, SyncOptions, World};
 use crate::{host, join};
 
 const LIMIT: Duration = Duration::from_secs(60);
@@ -78,6 +80,23 @@ impl Harness {
             server,
             max_connections,
             listen,
+            None,
+            |tunnel, stopped| {
+                tokio::spawn(tunnel.serve(listener, stopped));
+            },
+        )
+        .await
+    }
+
+    async fn start_sharing(server: SocketAddr, world: Arc<World>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        Self::start_with(
+            Edition::Java,
+            server,
+            None,
+            listen,
+            Some(world),
             |tunnel, stopped| {
                 tokio::spawn(tunnel.serve(listener, stopped));
             },
@@ -94,6 +113,7 @@ impl Harness {
             server,
             max_connections,
             listen,
+            None,
             |tunnel, stopped| {
                 tokio::spawn(tunnel.clone().serve_udp(socket, stopped.clone()));
                 tokio::spawn(tunnel.serve(listener, stopped));
@@ -107,6 +127,7 @@ impl Harness {
         server: SocketAddr,
         max_connections: Option<usize>,
         listen: SocketAddr,
+        world: Option<Arc<World>>,
         serve: impl FnOnce(join::Tunnel, watch::Receiver<bool>),
     ) -> Self {
         let _ = tracing_subscriber::fmt()
@@ -142,7 +163,8 @@ impl Harness {
             max_connections,
             label: "test".into(),
             connections: host_connections.clone(),
-            sync: None,
+            world,
+            world_asked: Default::default(),
         };
         tokio::spawn(control::run(
             host_control,
@@ -753,4 +775,92 @@ async fn a_java_host_refuses_datagrams() {
     assert!(!refused);
     assert_echoes(harness.connect().await, random_bytes(1_000)).await;
     harness.close().await;
+}
+
+/// Every file under `root` but the lock, with its contents.
+fn snapshot(root: &std::path::Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut folders = vec![root.to_owned()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if !path.ends_with("session.lock") {
+                let name = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.insert(name, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+async fn next_sync(events: &mut mpsc::UnboundedReceiver<Event>) -> usize {
+    loop {
+        let event = timeout(LIMIT, events.recv()).await.unwrap().unwrap();
+        if let Event::WorldSynced { files, .. } = event {
+            return files;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_friend_keeps_an_up_to_date_copy_of_the_world() {
+    let root = std::env::temp_dir().join(format!("mcrtc-sync-{:x}", rand::random::<u64>()));
+    let source = root.join("world");
+    std::fs::create_dir_all(source.join("region")).unwrap();
+    std::fs::create_dir_all(source.join("playerdata")).unwrap();
+    std::fs::write(source.join("level.dat"), random_bytes(1500)).unwrap();
+    std::fs::write(source.join("region/r.0.0.mca"), random_bytes(700_000)).unwrap();
+    std::fs::write(source.join("playerdata/alex.dat"), random_bytes(900)).unwrap();
+    std::fs::write(source.join("session.lock"), b"held").unwrap();
+    let copy = root.join("copy");
+
+    let world = World::open(&SyncOptions {
+        world_path: source.clone(),
+        interval_secs: 1,
+        rcon_address: None,
+        rcon_password: None,
+    })
+    .unwrap();
+    let scanner = tokio::spawn(world.clone().run());
+    let (server, _) = fake_server(echo).await;
+    let harness = Harness::start_sharing(server, world).await;
+
+    let (events_tx, mut events) = mpsc::unbounded_channel();
+    let tunnel = harness.join_tunnel.clone();
+    let destination = copy.clone();
+    let follower = tokio::spawn(async move {
+        let reporter = Reporter::channel(events_tx);
+        let control = tunnel.control.as_ref();
+        sync::follow(
+            &tunnel.peer,
+            control,
+            &tunnel.pending,
+            destination,
+            &reporter,
+        )
+        .await;
+    });
+
+    assert_eq!(next_sync(&mut events).await, 3);
+    assert_eq!(snapshot(&copy), snapshot(&source));
+    assert!(!copy.join("session.lock").exists());
+
+    // Only what changed comes over: a grown region, a new one, and a player who is gone.
+    std::fs::write(source.join("region/r.0.0.mca"), random_bytes(704_096)).unwrap();
+    std::fs::write(source.join("region/r.1.0.mca"), random_bytes(8192)).unwrap();
+    std::fs::remove_file(source.join("playerdata/alex.dat")).unwrap();
+    assert_eq!(next_sync(&mut events).await, 2);
+    assert_eq!(snapshot(&copy), snapshot(&source));
+
+    follower.abort();
+    scanner.abort();
+    harness.host.close().await;
+    harness.joiner.close().await;
+    let _ = std::fs::remove_dir_all(&root);
 }

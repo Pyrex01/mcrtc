@@ -49,6 +49,8 @@ pub struct Joined {
     pub route: Option<String>,
     pub connections: usize,
     pub ping: Option<u64>,
+    /// How the copy of the host's world is doing, once it synced.
+    pub world: Option<String>,
 }
 
 /// The text of every form, kept while moving between screens.
@@ -62,11 +64,8 @@ pub struct Forms {
     pub turn_url: String,
     pub turn_user: String,
     pub turn_pass: String,
-    pub world_path: String,
+    pub world: String,
     pub sync_path: String,
-    pub sync_interval: String,
-    pub rcon_address: String,
-    pub rcon_password: String,
     pub invite: String,
     pub listen: String,
     pub name: String,
@@ -85,11 +84,8 @@ impl Forms {
             turn_url: self.turn_url.clone(),
             turn_user: self.turn_user.clone(),
             turn_pass: self.turn_pass.clone(),
-            world_path: self.world_path.clone(),
+            world: self.world.clone(),
             sync_path: self.sync_path.clone(),
-            sync_interval: self.sync_interval.clone(),
-            rcon_address: self.rcon_address.clone(),
-            rcon_password: self.rcon_password.clone(),
         }
     }
 
@@ -298,22 +294,22 @@ impl State {
                     route,
                     connections: 0,
                     ping: None,
+                    world: None,
                 });
                 self.screen = Screen::Joined;
             }
             Event::Left { reason } => self.left_reason = reason,
+            Event::WorldSynced { files, .. } => {
+                if let Some(joined) = &mut self.joined {
+                    let text = match files {
+                        0 => "World copy up to date".to_owned(),
+                        files => format!("World copy updated ({files} files)"),
+                    };
+                    joined.world = Some(text);
+                }
+            }
             Event::SessionEnded { error } => self.session_ended(error),
-            Event::Cancelled
-            | Event::StdinClosed
-            | Event::WaitingForHost
-            | Event::Started { .. }
-            | Event::InviteReady { .. }
-            | Event::ReplyReady { .. }
-            | Event::WaitingForReply
-            | Event::Connected { .. }
-            | Event::FriendUpdated { .. }
-            | Event::Failed { .. }
-            | Event::Stopped => {}
+            Event::Cancelled | Event::StdinClosed | Event::WaitingForHost => {}
         }
         None
     }
