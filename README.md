@@ -125,7 +125,7 @@ mcrtc                                    Open the interface
 mcrtc ui
 mcrtc host [--server 127.0.0.1:25565] [--whitelist-file ids.txt]
            [--max-peers N] [--max-connections N]
-mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem]
+mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem] [--sync-path ./world]
 
 Common: --edition java|bedrock, --config mcrtc.toml, --stun <url> (repeatable),
         --turn <url> --turn-user <u> --turn-pass <p>, --raw-json, -v
@@ -138,6 +138,12 @@ config file. Flags win over the file.
 `--server` and `--listen` default to port 25565 for Java and 19132 for Bedrock. In the interface,
 `server` and `listen` from a config file belong to the edition it starts on, which is the file's
 `edition` or `--edition`; the other edition uses its default.
+
+World synchronization is opt-in. Start the host with `--world <directory>` and configure RCON
+with `--rcon-address` and `--rcon-password`; joiners use `--sync-path <directory>`. The host sends
+compressed, checksummed snapshots over the encrypted WebRTC connection. Existing joiner worlds are
+backed up before replacement. If the host disappears, the session closes and a joiner with the
+latest snapshot can start its own Minecraft server from that local copy.
 
 The default STUN servers are `stun:stun.l.google.com:19302` and `stun:stun.cloudflare.com:3478`.
 

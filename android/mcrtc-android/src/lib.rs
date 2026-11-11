@@ -39,6 +39,8 @@ fn config(mode: Mode, value: &str) -> Config {
         whitelist: None,
         max_peers: None,
         max_connections: None,
+        sync: None,
+        sync_path: None,
     }
 }
 

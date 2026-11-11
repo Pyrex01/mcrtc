@@ -438,6 +438,11 @@ impl App {
     fn host_setup(&mut self, ui: &mut Ui) {
         let edition = self.state.forms.edition;
         let default_server = self.sessions.default_server(edition).to_owned();
+        let default_world = self
+            .sessions
+            .default_world_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
         self.page(
             ui,
             "Host a Server",
@@ -468,12 +473,52 @@ impl App {
                         |edit| edit,
                     );
                 });
+                widgets::field(
+                    ui,
+                    "World Folder (optional)",
+                    &mut forms.world_path,
+                    if default_world.is_empty() {
+                        "Disabled"
+                    } else {
+                        &default_world
+                    },
+                    |edit| edit,
+                );
+                halves(ui, |left, right| {
+                    widgets::field(
+                        left,
+                        "RCON Address",
+                        &mut forms.rcon_address,
+                        "127.0.0.1:25575",
+                        |edit| edit,
+                    );
+                    widgets::field(
+                        right,
+                        "RCON Password",
+                        &mut forms.rcon_password,
+                        "Optional",
+                        |edit| edit.password(true),
+                    );
+                });
+                widgets::field(
+                    ui,
+                    "Sync Interval (seconds)",
+                    &mut forms.sync_interval,
+                    "300",
+                    |edit| edit,
+                );
                 widgets::gap(ui, GAP);
                 let hint = format!(
                     "Start your {} server first, then press Start Hosting.",
                     edition.name()
                 );
                 widgets::paragraph(ui, &hint, MUTED, Align::Min);
+                widgets::paragraph(
+                    ui,
+                    "World sync uses RCON to flush saves before sending snapshots.",
+                    MUTED,
+                    Align::Min,
+                );
             },
             |app, ui| {
                 let half = (COLUMN - GAP) / 2.0;
@@ -606,6 +651,11 @@ impl App {
     fn join_setup(&mut self, ui: &mut Ui) {
         let edition = self.state.forms.edition;
         let default_listen = self.sessions.default_listen(edition).to_owned();
+        let default_sync = self
+            .sessions
+            .default_sync_path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
         self.page(
             ui,
             "Join a Friend",
@@ -625,6 +675,17 @@ impl App {
                     "Local Address for Minecraft",
                     &mut forms.listen,
                     &default_listen,
+                    |edit| edit,
+                );
+                widgets::field(
+                    ui,
+                    "World Destination (optional)",
+                    &mut forms.sync_path,
+                    if default_sync.is_empty() {
+                        "Disabled"
+                    } else {
+                        &default_sync
+                    },
                     |edit| edit,
                 );
                 if !app.state.error.is_empty() {

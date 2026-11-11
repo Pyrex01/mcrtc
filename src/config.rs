@@ -67,6 +67,11 @@ pub struct FileConfig {
     pub identity: Option<PathBuf>,
     pub max_peers: Option<usize>,
     pub max_connections: Option<usize>,
+    pub world_path: Option<PathBuf>,
+    pub sync_path: Option<PathBuf>,
+    pub sync_interval_secs: Option<u64>,
+    pub rcon_address: Option<String>,
+    pub rcon_password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

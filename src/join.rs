@@ -24,6 +24,7 @@ use crate::events::{Event, Reporter};
 use crate::host::report_stats;
 use crate::invite::{Payload, PayloadType, DEFAULT_TTL};
 use crate::peer::{certificate_id, generate_certificate, ChannelHandler, Peer, PeerOptions};
+use crate::sync;
 
 /// The host needs time to receive and paste the reply, so this is as long as a reply stays valid.
 const CONNECT_TIMEOUT: Duration = DEFAULT_TTL;
@@ -45,6 +46,7 @@ pub struct JoinOptions {
     pub listen: String,
     pub raw_json: bool,
     pub reporter: Reporter,
+    pub sync_path: Option<std::path::PathBuf>,
 }
 
 /// Where Minecraft connects. Bedrock takes the same port on both protocols, because a server is
@@ -199,16 +201,26 @@ impl Tunnel {
 }
 
 /// Hands the host's `control` channel to `control` and refuses anything else.
-fn control_handler(control: mpsc::Sender<Arc<dyn DataChannel>>) -> ChannelHandler {
+fn control_handler(
+    control: mpsc::Sender<Arc<dyn DataChannel>>,
+    sync_path: Option<std::path::PathBuf>,
+) -> ChannelHandler {
     Arc::new(move |channel| {
         let control = control.clone();
+        let sync_path = sync_path.clone();
         tokio::spawn(async move {
-            if channel
-                .label()
-                .await
-                .is_ok_and(|label| label == control::LABEL)
-            {
+            let label = channel.label().await.unwrap_or_default();
+            if label == control::LABEL {
                 let _ = control.try_send(channel);
+            } else if let Some(path) = sync_path.clone() {
+                if label.starts_with("mcrtc-sync-") {
+                    if let Err(error) = sync::receive_channel(channel, path).await {
+                        warn!(%error, "world sync failed");
+                    }
+                } else {
+                    warn!("refusing an unknown data channel from the host");
+                    let _ = channel.close().await;
+                }
             } else {
                 warn!("refusing an unknown data channel from the host");
                 let _ = channel.close().await;
@@ -250,7 +262,11 @@ pub async fn run(
     };
 
     let (control_tx, mut control_rx) = mpsc::channel(1);
-    let peer = Peer::new(options.peer, control_handler(control_tx)).await?;
+    let peer = Peer::new(
+        options.peer,
+        control_handler(control_tx, options.sync_path.clone()),
+    )
+    .await?;
     let session = async {
         reporter.report(Event::Gathering);
         let sdp = peer.accept_offer(sdp).await?;

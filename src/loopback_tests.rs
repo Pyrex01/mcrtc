@@ -142,6 +142,7 @@ impl Harness {
             max_connections,
             label: "test".into(),
             connections: host_connections.clone(),
+            sync: None,
         };
         tokio::spawn(control::run(
             host_control,

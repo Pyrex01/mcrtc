@@ -62,6 +62,11 @@ pub struct Forms {
     pub turn_url: String,
     pub turn_user: String,
     pub turn_pass: String,
+    pub world_path: String,
+    pub sync_path: String,
+    pub sync_interval: String,
+    pub rcon_address: String,
+    pub rcon_password: String,
     pub invite: String,
     pub listen: String,
     pub name: String,
@@ -80,6 +85,11 @@ impl Forms {
             turn_url: self.turn_url.clone(),
             turn_user: self.turn_user.clone(),
             turn_pass: self.turn_pass.clone(),
+            world_path: self.world_path.clone(),
+            sync_path: self.sync_path.clone(),
+            sync_interval: self.sync_interval.clone(),
+            rcon_address: self.rcon_address.clone(),
+            rcon_password: self.rcon_password.clone(),
         }
     }
 

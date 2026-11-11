@@ -21,10 +21,13 @@ pub mod invite;
 pub mod join;
 #[path = "../../../src/peer.rs"]
 pub mod peer;
+#[path = "../../../src/sync.rs"]
+pub mod sync;
 
 pub use config::TurnServer;
 pub use edition::Edition;
 pub use events::Event;
+pub use sync::SyncOptions;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc as std_mpsc;
@@ -46,6 +49,10 @@ pub struct Config {
     pub whitelist: Option<HashSet<String>>,
     pub max_peers: Option<usize>,
     pub max_connections: Option<usize>,
+    /// Host: share this world folder with friends.
+    pub sync: Option<SyncOptions>,
+    /// Join: where to keep the host's latest world snapshot.
+    pub sync_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +115,7 @@ impl Session {
                                 whitelist: config.whitelist,
                                 raw_json: false,
                                 reporter,
+                                sync: config.sync,
                             },
                             console,
                             stopped,
@@ -122,6 +130,7 @@ impl Session {
                                 listen: config.listen,
                                 raw_json: false,
                                 reporter,
+                                sync_path: config.sync_path,
                             },
                             console,
                             stopped,
