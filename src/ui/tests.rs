@@ -2,7 +2,7 @@
 //! the two-window test tunnels over real peer connections on loopback.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,7 @@ type Window = Harness<'static, Option<App>>;
 fn options(server: String, listen: String) -> UiOptions {
     UiOptions {
         peer: PeerOptions::loopback(),
+        edition: Edition::Java,
         server,
         listen,
         max_peers: None,
@@ -187,6 +188,38 @@ fn the_title_screen_leads_everywhere_and_back() {
     assert_eq!(state(&window).screen, Screen::JoinSetup);
     click(&mut window, "Cancel");
     assert_eq!(state(&window).screen, Screen::Title);
+}
+
+#[test]
+fn the_title_screen_picks_the_edition_and_its_default_addresses() {
+    let runtime = Runtime::new().unwrap();
+    let mut window = window(&runtime);
+    assert_eq!(state(&window).forms.edition, Edition::Java);
+
+    click(&mut window, "Bedrock Edition");
+    assert_eq!(state(&window).forms.edition, Edition::Bedrock);
+
+    click(&mut window, "Host a Server");
+    assert!(window
+        .query_by_label_contains("Bedrock Edition server")
+        .is_some());
+    let sessions = window.state().as_ref().unwrap().sessions.clone();
+    assert_eq!(sessions.default_server(Edition::Bedrock), "127.0.0.1:19132");
+    assert_eq!(sessions.default_listen(Edition::Bedrock), "127.0.0.1:19132");
+    // Configured addresses stay with the edition the window started on.
+    assert_eq!(sessions.default_server(Edition::Java), "127.0.0.1:9");
+}
+
+#[test]
+fn the_title_screen_fits_the_smallest_window() {
+    let runtime = Runtime::new().unwrap();
+    let free = "127.0.0.1:0".to_owned();
+    let options = options("127.0.0.1:9".to_owned(), free);
+    let window = window_with(&runtime, options, (320.0, 240.0));
+    for label in ["Bedrock Edition", "Host a Server", "Join a Friend", "Quit"] {
+        let rect = window.get_by_label(label).rect();
+        assert!(rect.bottom() <= 240.0, "{label} is off screen at {rect:?}");
+    }
 }
 
 #[test]
@@ -366,6 +399,120 @@ fn two_windows_tunnel_to_the_server() {
     wait(&mut windows, |windows| {
         state(windows[1]).screen == Screen::Title && state(windows[0]).friends.is_empty()
     });
+    click(&mut host, "Stop Hosting");
+    wait_for(&mut host, Screen::Title);
+}
+
+fn bedrock_options(server: String, listen: String) -> UiOptions {
+    UiOptions {
+        edition: Edition::Bedrock,
+        ..options(server, listen)
+    }
+}
+
+fn udp_echo_server() -> u16 {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = socket.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut buffer = [0; 2048];
+        while let Ok((read, client)) = socket.recv_from(&mut buffer) {
+            let _ = socket.send_to(&buffer[..read], client);
+        }
+    });
+    port
+}
+
+fn free_udp_port() -> u16 {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.local_addr().unwrap().port()
+}
+
+/// As far as an invite and a reply, with the friend on the edition `friend` was started with.
+fn paste_invite(host: &mut Window, friend: &mut Window) {
+    start_hosting(host);
+    make_invite(host, "alex");
+    let invite = click_to_copy(host, "Copy Invite");
+    click(friend, "Join a Friend");
+    let label = "Paste the invite from the host";
+    paste(friend, Role::MultilineTextInput, label, &invite);
+    click(friend, "Join Server");
+}
+
+#[test]
+fn two_windows_tunnel_to_a_bedrock_server() {
+    let runtime = Runtime::new().unwrap();
+    let port = free_udp_port();
+    let server = format!("127.0.0.1:{}", udp_echo_server());
+    let host_options = bedrock_options(server, "127.0.0.1:0".to_owned());
+    let mut host = window_with(&runtime, host_options, (500.0, 320.0));
+    let friend_options = bedrock_options("127.0.0.1:9".to_owned(), format!("127.0.0.1:{port}"));
+    let mut friend = window_with(&runtime, friend_options, (500.0, 320.0));
+
+    paste_invite(&mut host, &mut friend);
+    wait_for(&mut friend, Screen::Reply);
+    let reply = click_to_copy(&mut friend, "Copy Reply");
+    let label = "2. Paste the reply from alex";
+    paste(&mut host, Role::MultilineTextInput, label, &reply);
+    click(&mut host, "Connect");
+    let mut windows = [&mut host, &mut friend];
+    wait(&mut windows, |windows| {
+        state(windows[1]).screen == Screen::Joined && state(windows[0]).friends.len() == 1
+    });
+    assert!(friend
+        .query_by_label(&format!("127.0.0.1:{port}"))
+        .is_some());
+    assert!(friend.query_by_label_contains("Add Server").is_some());
+
+    let game = UdpSocket::bind("127.0.0.1:0").unwrap();
+    game.connect(("127.0.0.1", port)).unwrap();
+    game.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let start = Instant::now();
+    let mut answer = [0; 32];
+    loop {
+        assert!(start.elapsed() < LIMIT, "no datagram came back");
+        game.send(b"hello through the window").unwrap();
+        if let Ok(read) = game.recv(&mut answer) {
+            assert_eq!(&answer[..read], b"hello through the window");
+            break;
+        }
+    }
+    let mut windows = [&mut host, &mut friend];
+    wait(&mut windows, |windows| {
+        state(windows[0])
+            .friends
+            .first()
+            .is_some_and(|f| f.connections == 1)
+    });
+
+    click(&mut friend, "Disconnect");
+    let mut windows = [&mut host, &mut friend];
+    wait(&mut windows, |windows| {
+        state(windows[1]).screen == Screen::Title && state(windows[0]).friends.is_empty()
+    });
+    click(&mut host, "Stop Hosting");
+    wait_for(&mut host, Screen::Title);
+}
+
+#[test]
+fn a_java_friend_is_told_the_invite_is_for_bedrock() {
+    let runtime = Runtime::new().unwrap();
+    let host_options = bedrock_options("127.0.0.1:9".to_owned(), "127.0.0.1:0".to_owned());
+    let mut host = window_with(&runtime, host_options, (500.0, 320.0));
+    let mut friend = window(&runtime);
+
+    paste_invite(&mut host, &mut friend);
+    let mut windows = [&mut friend];
+    wait(&mut windows, |windows| !state(windows[0]).error.is_empty());
+    assert_eq!(state(&friend).screen, Screen::JoinSetup);
+    assert!(state(&friend).error.contains("for Bedrock Edition"));
+
+    click(&mut friend, "Cancel");
+    wait_for(&mut friend, Screen::Title);
+    click(&mut friend, "Bedrock Edition");
+    assert_eq!(state(&friend).forms.edition, Edition::Bedrock);
+    click(&mut host, "Cancel");
+    wait_for(&mut host, Screen::Friends);
     click(&mut host, "Stop Hosting");
     wait_for(&mut host, Screen::Title);
 }

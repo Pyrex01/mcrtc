@@ -8,13 +8,15 @@ use std::time::Duration;
 
 use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout, Instant};
 
 use crate::bridge::{Counter, BUFFERED_HIGH};
 use crate::control::{self, PendingOpens, Role};
+use crate::datagram::test_support::{pong, pong_status, STATUS};
+use crate::edition::Edition;
 use crate::peer::test_support::*;
 use crate::peer::{Peer, PeerOptions};
 use crate::{host, join};
@@ -63,11 +65,50 @@ struct Harness {
     joiner: Peer,
     host_connections: Counter,
     join_connections: Counter,
+    join_tunnel: join::Tunnel,
     _stop: watch::Sender<bool>,
 }
 
 impl Harness {
     async fn start(server: SocketAddr, max_connections: Option<usize>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        Self::start_with(
+            Edition::Java,
+            server,
+            max_connections,
+            listen,
+            |tunnel, stopped| {
+                tokio::spawn(tunnel.serve(listener, stopped));
+            },
+        )
+        .await
+    }
+
+    async fn start_bedrock(server: SocketAddr, max_connections: Option<usize>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen = listener.local_addr().unwrap();
+        let socket = UdpSocket::bind(listen).await.unwrap();
+        Self::start_with(
+            Edition::Bedrock,
+            server,
+            max_connections,
+            listen,
+            |tunnel, stopped| {
+                tokio::spawn(tunnel.clone().serve_udp(socket, stopped.clone()));
+                tokio::spawn(tunnel.serve(listener, stopped));
+            },
+        )
+        .await
+    }
+
+    async fn start_with(
+        edition: Edition,
+        server: SocketAddr,
+        max_connections: Option<usize>,
+        listen: SocketAddr,
+        serve: impl FnOnce(join::Tunnel, watch::Receiver<bool>),
+    ) -> Self {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
             .with_test_writer()
@@ -96,6 +137,7 @@ impl Harness {
         let host_tunnel = host::Tunnel {
             peer: host.clone(),
             control: host_control.clone(),
+            edition,
             server: server.to_string(),
             max_connections,
             label: "test".into(),
@@ -115,6 +157,7 @@ impl Harness {
             control: join_control.clone(),
             pending: pending.clone(),
             connections: join_connections.clone(),
+            next_id: Arc::default(),
         };
         tokio::spawn(control::run(
             join_control,
@@ -123,15 +166,14 @@ impl Harness {
             watch::channel(None).0,
         ));
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listen = listener.local_addr().unwrap();
-        tokio::spawn(join_tunnel.serve(listener, stopped));
+        serve(join_tunnel.clone(), stopped);
         Self {
             listen,
             host,
             joiner,
             host_connections,
             join_connections,
+            join_tunnel,
             _stop: stop,
         }
     }
@@ -497,4 +539,217 @@ async fn the_host_can_paste_the_reply_late() {
         .unwrap();
     host.close().await;
     joiner.close().await;
+}
+
+/// Answers every datagram with `respond`, from one socket, the way a Bedrock server does.
+async fn fake_udp_server<F>(respond: F) -> SocketAddr
+where
+    F: Fn(&[u8], SocketAddr) -> Vec<u8> + Send + 'static,
+{
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buffer = vec![0; 65_535];
+        loop {
+            let (read, client) = socket.recv_from(&mut buffer).await.unwrap();
+            let _ = socket
+                .send_to(&respond(&buffer[..read], client), client)
+                .await;
+        }
+    });
+    address
+}
+
+async fn udp_client(listen: SocketAddr) -> UdpSocket {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(listen).await.unwrap();
+    socket
+}
+
+/// Keeps asking, as RakNet does, because datagrams may be lost while the flow starts up.
+async fn ask(client: &UdpSocket, question: &[u8]) -> Vec<u8> {
+    let mut buffer = vec![0; 65_535];
+    let asking = async {
+        loop {
+            client.send(question).await.unwrap();
+            if let Ok(read) = timeout(Duration::from_millis(200), client.recv(&mut buffer)).await {
+                return read.unwrap();
+            }
+        }
+    };
+    let read = timeout(LIMIT, asking).await.expect("no answer came back");
+    buffer[..read].to_vec()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn datagrams_keep_their_boundaries_and_clients_stay_apart() {
+    let server =
+        fake_udp_server(|data, client| [data, client.port().to_string().as_bytes()].join(&b'|'))
+            .await;
+    let harness = Harness::start_bedrock(server, None).await;
+    let alex = udp_client(harness.listen).await;
+    let sam = udp_client(harness.listen).await;
+
+    let from_alex = ask(&alex, b"alex").await;
+    let from_sam = ask(&sam, b"sam").await;
+    assert!(from_alex.starts_with(b"alex|"));
+    assert!(from_sam.starts_with(b"sam|"));
+    assert_ne!(
+        from_alex[5..],
+        from_sam[4..],
+        "the server should see two different clients"
+    );
+    wait_until("both flows to be counted", || {
+        harness.host_connections.get() == 2 && harness.join_connections.get() == 2
+    })
+    .await;
+
+    // The same client stays on its flow, so the server keeps seeing the same port.
+    assert_eq!(ask(&alex, b"alex").await, from_alex);
+    assert_eq!(harness.join_connections.get(), 2);
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_size_raknet_packet_survives_the_trip() {
+    let server = fake_udp_server(|data, _| data.to_vec()).await;
+    let harness = Harness::start_bedrock(server, None).await;
+    let client = udp_client(harness.listen).await;
+
+    // MTU discovery sends packets this big, more than one SCTP chunk can carry.
+    let data = random_bytes(1492);
+    assert_eq!(ask(&client, &data).await, data);
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_of_datagrams_gets_through() {
+    let server = fake_udp_server(|data, _| data.to_vec()).await;
+    let harness = Harness::start_bedrock(server, None).await;
+    let client = udp_client(harness.listen).await;
+    ask(&client, b"warm up").await;
+
+    for index in 0..200_u32 {
+        client.send(&index.to_be_bytes()).await.unwrap();
+        sleep(Duration::from_millis(1)).await;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut buffer = [0; 16];
+    while let Ok(Ok(read)) = timeout(Duration::from_secs(2), client.recv(&mut buffer)).await {
+        if read == 4 {
+            seen.insert(buffer[..4].to_vec());
+        }
+    }
+    // Loopback loses nothing, though nothing here promises every last one.
+    assert!(seen.len() >= 190, "only {} of 200 came back", seen.len());
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_pongs_point_the_game_at_the_tunnel() {
+    let server = fake_udp_server(move |_, _| pong(STATUS)).await;
+    let harness = Harness::start_bedrock(server, None).await;
+    let client = udp_client(harness.listen).await;
+
+    let answer = ask(&client, b"ping").await;
+    let port = harness.listen.port();
+    assert_eq!(
+        pong_status(&answer),
+        STATUS.replace("19150;19151", &format!("{port};{port}"))
+    );
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_limit_counts_clients_and_frees_up_when_the_friend_leaves() {
+    let server = fake_udp_server(|data, _| data.to_vec()).await;
+    let harness = Harness::start_bedrock(server, Some(1)).await;
+    let alex = udp_client(harness.listen).await;
+    let sam = udp_client(harness.listen).await;
+    ask(&alex, b"first").await;
+
+    sam.send(b"second").await.unwrap();
+    let mut buffer = [0; 16];
+    assert!(
+        timeout(Duration::from_millis(500), sam.recv(&mut buffer))
+            .await
+            .is_err(),
+        "the second client should have been refused"
+    );
+    assert_eq!(harness.host_connections.get(), 1);
+
+    let (host, joiner) = (harness.host.clone(), harness.joiner.clone());
+    host.close().await;
+    joiner.close().await;
+    harness.assert_idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_is_not_up_yet_can_still_be_reached_later() {
+    // Reserve a port, then free it, so the first datagrams bounce.
+    let spare = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = spare.local_addr().unwrap();
+    drop(spare);
+    let harness = Harness::start_bedrock(address, None).await;
+    let client = udp_client(harness.listen).await;
+    let mut buffer = [0; 16];
+    for _ in 0..3 {
+        client.send(b"anyone?").await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(200), client.recv(&mut buffer))
+                .await
+                .is_err()
+        );
+    }
+
+    let server = UdpSocket::bind(address).await.unwrap();
+    tokio::spawn(async move {
+        let mut buffer = [0; 16];
+        loop {
+            let (read, client) = server.recv_from(&mut buffer).await.unwrap();
+            let _ = server.send_to(&buffer[..read], client).await;
+        }
+    });
+    assert_eq!(ask(&client, b"anyone?").await, b"anyone?");
+    harness.close().await;
+}
+
+/// A NetherNet server signals over TCP on its port, and a RakNet one answers UDP on the same port.
+#[tokio::test(flavor = "multi_thread")]
+async fn bedrock_carries_tcp_and_udp_side_by_side_without_mixing_them_up() {
+    let (server, _) = fake_server(echo).await;
+    let socket = UdpSocket::bind(server).await.unwrap();
+    tokio::spawn(async move {
+        let mut buffer = [0; 64];
+        loop {
+            let (read, client) = socket.recv_from(&mut buffer).await.unwrap();
+            let answer = [b"udp:", &buffer[..read]].concat();
+            let _ = socket.send_to(&answer, client).await;
+        }
+    });
+    let harness = Harness::start_bedrock(server, None).await;
+
+    let client = udp_client(harness.listen).await;
+    assert_eq!(ask(&client, b"ping").await, b"udp:ping");
+    assert_echoes(harness.connect().await, random_bytes(100_000)).await;
+    assert_eq!(ask(&client, b"pong").await, b"udp:pong");
+    harness.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_java_host_refuses_datagrams() {
+    let (server, _) = fake_server(echo).await;
+    let harness = Harness::start(server, None).await;
+    let refused = harness
+        .join_tunnel
+        .pending
+        .request(
+            harness.join_tunnel.control.as_ref(),
+            1_000,
+            control::Transport::Datagrams,
+        )
+        .await;
+    assert!(!refused);
+    assert_echoes(harness.connect().await, random_bytes(1_000)).await;
+    harness.close().await;
 }

@@ -1,5 +1,6 @@
 //! The session as the window sees it, folded from its events. Nothing here draws or does I/O.
 
+use crate::edition::Edition;
 use crate::events::Event;
 
 use super::session::{Mode, Settings};
@@ -53,6 +54,7 @@ pub struct Joined {
 /// The text of every form, kept while moving between screens.
 #[derive(Debug, Default, Clone)]
 pub struct Forms {
+    pub edition: Edition,
     pub server: String,
     pub max_peers: String,
     pub max_connections: String,
@@ -69,6 +71,7 @@ pub struct Forms {
 impl Forms {
     pub fn settings(&self) -> Settings {
         Settings {
+            edition: self.edition,
             server: self.server.clone(),
             listen: self.listen.clone(),
             max_peers: positive(&self.max_peers),
@@ -77,6 +80,15 @@ impl Forms {
             turn_url: self.turn_url.clone(),
             turn_user: self.turn_user.clone(),
             turn_pass: self.turn_pass.clone(),
+        }
+    }
+
+    /// Addresses typed for one edition are wrong for the other, so they do not carry over.
+    pub fn choose_edition(&mut self, edition: Edition) {
+        if self.edition != edition {
+            self.edition = edition;
+            self.server.clear();
+            self.listen.clear();
         }
     }
 }
@@ -281,7 +293,17 @@ impl State {
             }
             Event::Left { reason } => self.left_reason = reason,
             Event::SessionEnded { error } => self.session_ended(error),
-            Event::Cancelled | Event::StdinClosed | Event::WaitingForHost => {}
+            Event::Cancelled
+            | Event::StdinClosed
+            | Event::WaitingForHost
+            | Event::Started { .. }
+            | Event::InviteReady { .. }
+            | Event::ReplyReady { .. }
+            | Event::WaitingForReply
+            | Event::Connected { .. }
+            | Event::FriendUpdated { .. }
+            | Event::Failed { .. }
+            | Event::Stopped => {}
         }
         None
     }
@@ -485,6 +507,23 @@ mod tests {
         assert_eq!(state.failure.title, "Connection Lost");
         assert_eq!(state.back_from_failure(), Screen::Title);
         assert!(state.friends.is_empty());
+    }
+
+    #[test]
+    fn addresses_do_not_follow_a_change_of_edition() {
+        let mut forms = Forms {
+            server: "10.0.0.5:25565".into(),
+            listen: "127.0.0.1:25566".into(),
+            max_peers: "4".into(),
+            ..Forms::default()
+        };
+        forms.choose_edition(Edition::Java);
+        assert_eq!(forms.server, "10.0.0.5:25565");
+
+        forms.choose_edition(Edition::Bedrock);
+        assert_eq!(forms.settings().edition, Edition::Bedrock);
+        assert!(forms.server.is_empty() && forms.listen.is_empty());
+        assert_eq!(forms.max_peers, "4");
     }
 
     #[test]

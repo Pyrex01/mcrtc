@@ -2,6 +2,8 @@ mod bridge;
 mod config;
 mod console;
 mod control;
+mod datagram;
+mod edition;
 mod events;
 mod host;
 mod invite;
@@ -28,13 +30,10 @@ use join::JoinOptions;
 use peer::{load_or_create_identity, PeerOptions};
 use ui::UiOptions;
 
-const DEFAULT_SERVER: &str = "127.0.0.1:25565";
-const DEFAULT_LISTEN: &str = "127.0.0.1:25565";
-
 const IP_WARNING: &str = "Warning: invites and replies contain your IP addresses. \
                           Only share them with people you trust.";
 
-/// Tunnel Minecraft Java TCP traffic over WebRTC data channels.
+/// Tunnel Minecraft Java and Bedrock traffic over WebRTC data channels.
 #[derive(Parser)]
 #[command(name = "mcrtc", version, about)]
 struct Cli {
@@ -50,7 +49,7 @@ struct Cli {
 enum Command {
     /// Share a local Minecraft server with friends
     Host {
-        /// Address of the Minecraft server [default: 127.0.0.1:25565]
+        /// Address of the Minecraft server [default: 127.0.0.1:25565, Bedrock 127.0.0.1:19132]
         #[arg(long, value_name = "ADDR")]
         server: Option<String>,
 
@@ -62,7 +61,7 @@ enum Command {
         #[arg(long, value_name = "N")]
         max_peers: Option<usize>,
 
-        /// Maximum number of TCP connections per friend
+        /// Maximum number of connections per friend
         #[arg(long, value_name = "N")]
         max_connections: Option<usize>,
     },
@@ -70,7 +69,7 @@ enum Command {
     Ui,
     /// Connect to a friend's server
     Join {
-        /// Local address Minecraft connects to [default: 127.0.0.1:25565]
+        /// Local address Minecraft connects to [default: 127.0.0.1:25565, Bedrock 127.0.0.1:19132]
         #[arg(long, value_name = "ADDR")]
         listen: Option<String>,
 
@@ -118,6 +117,8 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
     let ice = IceConfig::resolve(&cli.common, &file)?;
     let mut peer = PeerOptions::new(ice);
     let raw_json = cli.common.raw_json;
+    let edition = cli.common.edition.or(file.edition).unwrap_or_default();
+    let default_address = edition.default_address().to_owned();
     println!("{IP_WARNING}");
 
     match cli.command.unwrap_or(Command::Ui) {
@@ -127,8 +128,9 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             }
             let options = UiOptions {
                 peer,
-                server: file.server.unwrap_or_else(|| DEFAULT_SERVER.to_owned()),
-                listen: file.listen.unwrap_or_else(|| DEFAULT_LISTEN.to_owned()),
+                edition,
+                server: file.server.unwrap_or_else(|| default_address.clone()),
+                listen: file.listen.unwrap_or(default_address),
                 max_peers: file.max_peers,
                 max_connections: file.max_connections,
                 whitelist: file
@@ -148,9 +150,8 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             let whitelist_file = whitelist_file.or(file.whitelist_file);
             let options = HostOptions {
                 peer,
-                server: server
-                    .or(file.server)
-                    .unwrap_or_else(|| DEFAULT_SERVER.to_owned()),
+                edition,
+                server: server.or(file.server).unwrap_or(default_address),
                 max_peers: max_peers.or(file.max_peers),
                 max_connections: max_connections.or(file.max_connections),
                 whitelist: whitelist_file.as_deref().map(load_whitelist).transpose()?,
@@ -165,9 +166,8 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             }
             let options = JoinOptions {
                 peer,
-                listen: listen
-                    .or(file.listen)
-                    .unwrap_or_else(|| DEFAULT_LISTEN.to_owned()),
+                edition,
+                listen: listen.or(file.listen).unwrap_or(default_address),
                 raw_json,
                 reporter: Reporter::terminal(),
             };

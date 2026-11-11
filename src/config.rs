@@ -8,6 +8,7 @@ use anyhow::{bail, ensure, Context, Result};
 use clap::Args;
 use serde::Deserialize;
 
+use crate::edition::Edition;
 use crate::invite::normalize_fingerprint;
 
 pub const DEFAULT_STUN: [&str; 2] = [
@@ -18,6 +19,10 @@ pub const DEFAULT_STUN: [&str; 2] = [
 /// Options shared by `host` and `join`.
 #[derive(Debug, Clone, Default, Args)]
 pub struct CommonArgs {
+    /// Which Minecraft to tunnel [default: java]
+    #[arg(long, value_enum, global = true)]
+    pub edition: Option<Edition>,
+
     /// TOML config file (see README)
     #[arg(long, value_name = "FILE", global = true)]
     pub config: Option<PathBuf>,
@@ -55,6 +60,7 @@ pub struct FileConfig {
     pub stun: Option<Vec<String>>,
     #[serde(default)]
     pub turn: Vec<TurnServer>,
+    pub edition: Option<Edition>,
     pub server: Option<String>,
     pub listen: Option<String>,
     pub whitelist_file: Option<PathBuf>,
@@ -236,6 +242,13 @@ mod tests {
             ..Default::default()
         };
         assert!(IceConfig::resolve(&args, &FileConfig::default()).is_err());
+    }
+
+    #[test]
+    fn the_edition_comes_from_the_file() {
+        let file: FileConfig = toml::from_str(r#"edition = "bedrock""#).unwrap();
+        assert_eq!(file.edition, Some(Edition::Bedrock));
+        assert!(toml::from_str::<FileConfig>(r#"edition = "pocket""#).is_err());
     }
 
     #[test]

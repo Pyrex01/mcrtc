@@ -12,6 +12,7 @@ use tokio::time::timeout;
 
 use crate::config::{IceConfig, TurnServer};
 use crate::console::Console;
+use crate::edition::Edition;
 use crate::events::{Event, Reporter};
 use crate::host::{self, HostOptions};
 use crate::join::{self, JoinOptions};
@@ -21,6 +22,8 @@ const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub struct UiOptions {
     pub peer: PeerOptions,
+    /// Selected at first. `server` and `listen` belong to this edition.
+    pub edition: Edition,
     pub server: String,
     pub listen: String,
     pub max_peers: Option<usize>,
@@ -37,6 +40,7 @@ pub enum Mode {
 /// What the forms hold. Empty strings mean "use the default".
 #[derive(Debug, Default, Clone)]
 pub struct Settings {
+    pub edition: Edition,
     pub server: String,
     pub listen: String,
     pub max_peers: Option<usize>,
@@ -80,12 +84,24 @@ impl Sessions {
         (sessions, events)
     }
 
-    pub fn default_server(&self) -> &str {
-        &self.options.server
+    pub fn first_edition(&self) -> Edition {
+        self.options.edition
     }
 
-    pub fn default_listen(&self) -> &str {
-        &self.options.listen
+    pub fn default_server(&self, edition: Edition) -> &str {
+        if edition == self.options.edition {
+            &self.options.server
+        } else {
+            edition.default_address()
+        }
+    }
+
+    pub fn default_listen(&self, edition: Edition) -> &str {
+        if edition == self.options.edition {
+            &self.options.listen
+        } else {
+            edition.default_address()
+        }
     }
 
     fn resolve_ice(&self, settings: &Settings) -> Result<IceConfig> {
@@ -140,8 +156,9 @@ impl Sessions {
             "" => default.to_owned(),
             value => value.to_owned(),
         };
-        let server = or_default(settings.server, &self.options.server);
-        let listen = or_default(settings.listen, &self.options.listen);
+        let edition = settings.edition;
+        let server = or_default(settings.server, self.default_server(edition));
+        let listen = or_default(settings.listen, self.default_listen(edition));
         let max_peers = settings.max_peers.or(self.options.max_peers);
         let max_connections = settings.max_connections.or(self.options.max_connections);
         let whitelist = self.options.whitelist.clone();
@@ -151,6 +168,7 @@ impl Sessions {
                 Mode::Host => {
                     let options = HostOptions {
                         peer,
+                        edition,
                         server,
                         max_peers,
                         max_connections,
@@ -163,6 +181,7 @@ impl Sessions {
                 Mode::Join => {
                     let options = JoinOptions {
                         peer,
+                        edition,
                         listen,
                         raw_json: false,
                         reporter: reporter.clone(),

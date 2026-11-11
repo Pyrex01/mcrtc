@@ -23,6 +23,7 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use crate::control::stop_requested;
+use crate::edition::Edition;
 use crate::events::Event;
 
 pub use session::UiOptions;
@@ -134,8 +135,10 @@ fn plural(count: usize, word: &str) -> String {
 impl App {
     fn new(ctx: &egui::Context, sessions: Arc<Sessions>, events: mpsc::Receiver<Event>) -> Self {
         widgets::install_style(ctx);
+        let mut state = State::default();
+        state.forms.edition = sessions.first_edition();
         Self {
-            state: State::default(),
+            state,
             sessions,
             events,
             theme: Rc::new(Theme::new(ctx)),
@@ -369,10 +372,23 @@ impl App {
             )
         };
         let theme = self.theme.clone();
+        let half = (COLUMN - GAP) / 2.0;
+        let mut editions = ui.new_child(
+            UiBuilder::new()
+                .id_salt("edition")
+                .max_rect(column(row_top(0.0)))
+                .layout(Layout::left_to_right(Align::Min)),
+        );
+        for edition in Edition::ALL {
+            let selected = self.state.forms.edition == edition;
+            if widgets::choice(&mut editions, &theme, edition.name(), half, selected).clicked() {
+                self.state.forms.choose_edition(edition);
+            }
+        }
         let mut host = ui.new_child(
             UiBuilder::new()
                 .id_salt("host")
-                .max_rect(column(row_top(0.0))),
+                .max_rect(column(row_top(1.0))),
         );
         if widgets::button(&mut host, &theme, "Host a Server", COLUMN, true).clicked() {
             self.state.screen = Screen::HostSetup;
@@ -380,7 +396,7 @@ impl App {
         let mut join = ui.new_child(
             UiBuilder::new()
                 .id_salt("join")
-                .max_rect(column(row_top(1.0))),
+                .max_rect(column(row_top(2.0))),
         );
         if widgets::button(&mut join, &theme, "Join a Friend", COLUMN, true).clicked() {
             self.state.screen = Screen::JoinSetup;
@@ -388,9 +404,8 @@ impl App {
         let mut last = ui.new_child(
             UiBuilder::new()
                 .id_salt("last")
-                .max_rect(column(row_top(2.0))),
+                .max_rect(column(row_top(3.0))),
         );
-        let half = (COLUMN - GAP) / 2.0;
         match self.buttons(&mut last, &[("Options...", true), ("Quit", true)], half) {
             Some(0) => self.state.screen = Screen::Options,
             Some(_) => ui.ctx().send_viewport_cmd(ViewportCommand::Close),
@@ -421,7 +436,8 @@ impl App {
     }
 
     fn host_setup(&mut self, ui: &mut Ui) {
-        let default_server = self.sessions.default_server().to_owned();
+        let edition = self.state.forms.edition;
+        let default_server = self.sessions.default_server(edition).to_owned();
         self.page(
             ui,
             "Host a Server",
@@ -453,8 +469,11 @@ impl App {
                     );
                 });
                 widgets::gap(ui, GAP);
-                let hint = "Start your Minecraft server first, then press Start Hosting.";
-                widgets::paragraph(ui, hint, MUTED, Align::Min);
+                let hint = format!(
+                    "Start your {} server first, then press Start Hosting.",
+                    edition.name()
+                );
+                widgets::paragraph(ui, &hint, MUTED, Align::Min);
             },
             |app, ui| {
                 let half = (COLUMN - GAP) / 2.0;
@@ -585,7 +604,8 @@ impl App {
     }
 
     fn join_setup(&mut self, ui: &mut Ui) {
-        let default_listen = self.sessions.default_listen().to_owned();
+        let edition = self.state.forms.edition;
+        let default_listen = self.sessions.default_listen(edition).to_owned();
         self.page(
             ui,
             "Join a Friend",
@@ -660,7 +680,11 @@ impl App {
                 let Some(joined) = app.state.joined.clone() else {
                     return;
                 };
-                widgets::paragraph(ui, "Add this server in Minecraft", MUTED, Align::Center);
+                let hint = match app.state.forms.edition {
+                    Edition::Java => "Add this server in Minecraft",
+                    Edition::Bedrock => "In Minecraft: Play, Servers, Add Server",
+                };
+                widgets::paragraph(ui, hint, MUTED, Align::Center);
                 widgets::gap(ui, GAP);
                 widgets::big_paragraph(ui, &joined.address, WHITE);
                 widgets::gap(ui, GAP);
