@@ -7,10 +7,26 @@ android {
         applicationId = "com.mcrtc.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.2.0"
         // One universal APK: libwebrtc ships a native library for each of these.
         ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86") }
+    }
+    // Release builds are signed with the keystore CI is given; without one they fall back to
+    // the debug key so the APK still installs.
+    val keystore = System.getenv("MCRTC_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
+    signingConfigs {
+        if (keystore != null) create("release") {
+            storeFile = keystore
+            storePassword = System.getenv("MCRTC_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("MCRTC_KEY_ALIAS")
+            keyPassword = System.getenv("MCRTC_KEY_PASSWORD")
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+        }
     }
     // The desktop app's Monocraft font, so both frontends draw the same letters.
     sourceSets["main"].assets.srcDir("../../assets/ui")
