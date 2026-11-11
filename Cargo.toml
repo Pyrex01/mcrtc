@@ -3,13 +3,6 @@ name = "mcrtc"
 version = "0.1.0"
 edition = "2021"
 
-[workspace]
-members = ["crates/mcrtc-core", "android/mcrtc-android"]
-resolver = "2"
-
-[dependencies.mcrtc-core]
-path = "crates/mcrtc-core"
-
 [dependencies]
 rand = "0.10.3"
 anyhow = "1.0.104"

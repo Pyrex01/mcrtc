@@ -293,17 +293,7 @@ impl State {
             }
             Event::Left { reason } => self.left_reason = reason,
             Event::SessionEnded { error } => self.session_ended(error),
-            Event::Cancelled
-            | Event::StdinClosed
-            | Event::WaitingForHost
-            | Event::Started { .. }
-            | Event::InviteReady { .. }
-            | Event::ReplyReady { .. }
-            | Event::WaitingForReply
-            | Event::Connected { .. }
-            | Event::FriendUpdated { .. }
-            | Event::Failed { .. }
-            | Event::Stopped => {}
+            Event::Cancelled | Event::StdinClosed | Event::WaitingForHost => {}
         }
         None
     }

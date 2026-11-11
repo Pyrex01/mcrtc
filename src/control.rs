@@ -37,8 +37,9 @@ const BYE_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How many stream IDs tunnel channels rotate through. Even IDs from 2 up; `control` is announced
-/// with DCEP and takes the lowest free ID of the host's DTLS role, which is 0 or 1.
-const STREAM_ID_COUNT: u64 = 30_000;
+/// with DCEP and takes the lowest free ID of the host's DTLS role, which is 0 or 1. libwebrtc, which
+/// the Android app uses, negotiates only 1024 SCTP streams, so every ID has to stay below that.
+const STREAM_ID_COUNT: u64 = 500;
 
 /// The stream ID of tunnel connection `id`.
 pub fn stream_id(id: u64) -> u16 {
@@ -249,7 +250,7 @@ mod tests {
         assert_eq!(stream_id(0), 2);
         assert_eq!(stream_id(1), 4);
         assert_eq!(stream_id(STREAM_ID_COUNT), stream_id(0));
-        assert!((0..STREAM_ID_COUNT * 2).all(|id| stream_id(id) >= 2 && stream_id(id) < 60_004));
+        assert!((0..STREAM_ID_COUNT * 2).all(|id| stream_id(id) >= 2 && stream_id(id) < 1024));
     }
 
     #[test]
