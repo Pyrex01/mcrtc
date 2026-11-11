@@ -66,6 +66,11 @@ pub enum Event {
     Left {
         reason: String,
     },
+    /// The local copy of the host's world caught up.
+    WorldSynced {
+        files: usize,
+        bytes: u64,
+    },
 
     SessionEnded {
         error: Option<String>,
@@ -114,6 +119,11 @@ impl Event {
             Event::WaitingForHost => "Waiting for the host to paste it...".to_owned(),
             Event::Joined { address, .. } => format!("Connected! Point Minecraft at {address}."),
             Event::Left { reason } => reason.clone(),
+            Event::WorldSynced { files: 0, .. } => "World copy is up to date.".to_owned(),
+            Event::WorldSynced { files, bytes } => format!(
+                "World copy updated: {files} files, {:.1} MB.",
+                *bytes as f64 / 1_000_000.0
+            ),
         })
     }
 }

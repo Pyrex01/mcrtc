@@ -1,6 +1,7 @@
 //! Host mode: the invite loop, per-friend supervision and reaching the Minecraft server.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use crate::edition::Edition;
 use crate::events::{Event, Reporter};
 use crate::invite::{sdp_fingerprints, Payload, PayloadType, DEFAULT_TTL};
 use crate::peer::{ChannelHandler, Peer, PeerOptions};
+use crate::sync::{self, SyncOptions, World};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,6 +36,8 @@ pub struct HostOptions {
     pub whitelist: Option<HashSet<String>>,
     pub raw_json: bool,
     pub reporter: Reporter,
+    /// Shares the world with friends who ask for it.
+    pub sync: Option<SyncOptions>,
 }
 
 /// Turns the friend's `open` requests into connections to the Minecraft server.
@@ -46,6 +50,9 @@ pub struct Tunnel {
     pub max_connections: Option<usize>,
     pub label: String,
     pub connections: Counter,
+    pub world: Option<Arc<World>>,
+    /// A friend gets one world channel per session.
+    pub world_asked: Arc<AtomicBool>,
 }
 
 /// This side's connection to the Minecraft server.
@@ -62,6 +69,9 @@ impl Tunnel {
     }
 
     async fn serve(self, id: u64, transport: Transport) {
+        if transport == Transport::World {
+            return self.serve_world(id).await;
+        }
         let channel_name = channel_label(id);
         if transport == Transport::Datagrams && self.edition == Edition::Java {
             warn!(peer = %self.label, "refusing {channel_name}, Java has no datagrams");
@@ -86,11 +96,39 @@ impl Tunnel {
         debug!(peer = %self.label, channel = %channel_name, "connection closed");
     }
 
+    async fn serve_world(self, id: u64) {
+        let world = match &self.world {
+            Some(world) if !self.world_asked.swap(true, Ordering::Relaxed) => world.clone(),
+            _ => {
+                debug!(peer = %self.label, "refusing a world channel");
+                control::answer_open(self.control.as_ref(), id, false).await;
+                return;
+            }
+        };
+        let channel = match self
+            .peer
+            .create_negotiated_channel(sync::LABEL, sync::STREAM_ID)
+            .await
+        {
+            Ok(channel) => channel,
+            Err(error) => {
+                warn!(peer = %self.label, "{error:#}");
+                control::answer_open(self.control.as_ref(), id, false).await;
+                return;
+            }
+        };
+        control::answer_open(self.control.as_ref(), id, true).await;
+        info!(peer = %self.label, "keeps a copy of the world");
+        world.serve(channel.clone(), self.label.clone()).await;
+        let _ = channel.close().await;
+    }
+
     async fn dial(&self, transport: Transport) -> Option<Server> {
         let dial = async {
             match transport {
                 Transport::Stream => TcpStream::connect(&self.server).await.map(Server::Tcp),
                 Transport::Datagrams => datagram::dial(&self.server).await.map(Server::Udp),
+                Transport::World => unreachable!("the world channel dials nothing"),
             }
         };
         match timeout(DIAL_TIMEOUT, dial).await {
@@ -239,6 +277,11 @@ pub async fn run(
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let reporter = options.reporter.clone();
+    if options.sync.is_some() && options.edition == Edition::Bedrock {
+        bail!("world sync only supports Java Edition so far");
+    }
+    let world = options.sync.as_ref().map(World::open).transpose()?;
+    let scanner = world.clone().map(|world| tokio::spawn(world.run()));
     reporter.report(Event::Hosting {
         server: options.server.clone(),
     });
@@ -252,7 +295,7 @@ pub async fn run(
 
         let stdin_open = tokio::select! {
             () = control::stop_requested(&mut stop) => break,
-            open = next_friend(&options, &peers, &mut console, friend, &mut sessions, &shutdown) => open,
+            open = next_friend(&options, &world, &peers, &mut console, friend, &mut sessions, &shutdown) => open,
         };
         if !stdin_open {
             reporter.report(Event::StdinClosed);
@@ -264,12 +307,17 @@ pub async fn run(
 
     reporter.report(Event::ShuttingDown);
     let _ = timeout(SHUTDOWN_TIMEOUT, sessions.join_all()).await;
+    // A scan in progress still finishes and turns saving back on: it runs on its own thread.
+    if let Some(scanner) = scanner {
+        scanner.abort();
+    }
     Ok(())
 }
 
 /// One round of the invite loop. Returns false when stdin is gone.
 async fn next_friend(
     options: &HostOptions,
+    world: &Option<Arc<World>>,
     peers: &Counter,
     console: &mut Console,
     friend: usize,
@@ -297,7 +345,7 @@ async fn next_friend(
         name => name.to_owned(),
     };
 
-    match invite(options, peers, console, label).await {
+    match invite(options, world, peers, console, label).await {
         Ok(Attempt::Connected(session, route)) => {
             let label = session.tunnel.label.clone();
             reporter.report(Event::FriendConnected { label, route });
@@ -316,6 +364,7 @@ async fn next_friend(
 
 async fn invite(
     options: &HostOptions,
+    world: &Option<Arc<World>>,
     peers: &Counter,
     console: &mut Console,
     label: String,
@@ -364,6 +413,8 @@ async fn invite(
                 max_connections: options.max_connections,
                 label,
                 connections: Counter::default(),
+                world: world.clone(),
+                world_asked: Arc::default(),
             };
             let slot = peers.acquire();
             Ok(Attempt::Connected(Session { tunnel, slot }, route))

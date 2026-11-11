@@ -11,6 +11,7 @@ mod join;
 #[cfg(test)]
 mod loopback_tests;
 mod peer;
+mod sync;
 mod ui;
 
 use std::path::PathBuf;
@@ -28,6 +29,7 @@ use events::Reporter;
 use host::HostOptions;
 use join::JoinOptions;
 use peer::{load_or_create_identity, PeerOptions};
+use sync::SyncOptions;
 use ui::UiOptions;
 
 const IP_WARNING: &str = "Warning: invites and replies contain your IP addresses. \
@@ -64,6 +66,22 @@ enum Command {
         /// Maximum number of connections per friend
         #[arg(long, value_name = "N")]
         max_connections: Option<usize>,
+
+        /// Let friends keep a copy of this Java world, or of the server folder's world
+        #[arg(long, value_name = "DIR")]
+        world: Option<PathBuf>,
+
+        /// Seconds between world snapshots [default: 300]
+        #[arg(long, value_name = "SECONDS")]
+        sync_interval: Option<u64>,
+
+        /// RCON address for pausing saves [default: from server.properties, or 127.0.0.1:25575]
+        #[arg(long, value_name = "ADDR")]
+        rcon_address: Option<String>,
+
+        /// RCON password [default: from server.properties]
+        #[arg(long, value_name = "PASS")]
+        rcon_password: Option<String>,
     },
     /// Open the graphical interface
     Ui,
@@ -76,6 +94,10 @@ enum Command {
         /// Keep a stable mcrtc ID in this file, created on first use
         #[arg(long, value_name = "FILE")]
         identity: Option<PathBuf>,
+
+        /// Keep a copy of the host's world in this folder
+        #[arg(long, value_name = "DIR")]
+        sync_path: Option<PathBuf>,
     },
 }
 
@@ -108,6 +130,23 @@ fn spawn_ctrl_c() -> watch::Receiver<bool> {
     rx
 }
 
+fn sync_options(
+    world: Option<PathBuf>,
+    interval: Option<u64>,
+    rcon_address: Option<String>,
+    rcon_password: Option<String>,
+    file: &FileConfig,
+) -> Option<SyncOptions> {
+    Some(SyncOptions {
+        world_path: world.or_else(|| file.world.clone())?,
+        interval_secs: interval
+            .or(file.sync_interval)
+            .unwrap_or(sync::DEFAULT_INTERVAL_SECS),
+        rcon_address: rcon_address.or_else(|| file.rcon_address.clone()),
+        rcon_password: rcon_password.or_else(|| file.rcon_password.clone()),
+    })
+}
+
 fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
     let _entered = runtime.enter();
     let file = match &cli.common.config {
@@ -127,6 +166,8 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                 peer.certificate = Some(load_or_create_identity(path)?);
             }
             let options = UiOptions {
+                sync: sync_options(None, None, None, None, &file),
+                sync_path: file.sync_path.clone(),
                 peer,
                 edition,
                 server: file.server.unwrap_or_else(|| default_address.clone()),
@@ -146,7 +187,12 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             whitelist_file,
             max_peers,
             max_connections,
+            world,
+            sync_interval,
+            rcon_address,
+            rcon_password,
         } => {
+            let sync = sync_options(world, sync_interval, rcon_address, rcon_password, &file);
             let whitelist_file = whitelist_file.or(file.whitelist_file);
             let options = HostOptions {
                 peer,
@@ -157,10 +203,15 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                 whitelist: whitelist_file.as_deref().map(load_whitelist).transpose()?,
                 raw_json,
                 reporter: Reporter::terminal(),
+                sync,
             };
             runtime.block_on(host::run(options, Console::from_stdin(), spawn_ctrl_c()))
         }
-        Command::Join { listen, identity } => {
+        Command::Join {
+            listen,
+            identity,
+            sync_path,
+        } => {
             if let Some(path) = identity.or(file.identity) {
                 peer.certificate = Some(load_or_create_identity(&path)?);
             }
@@ -170,6 +221,7 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                 listen: listen.or(file.listen).unwrap_or(default_address),
                 raw_json,
                 reporter: Reporter::terminal(),
+                sync_path: sync_path.or(file.sync_path),
             };
             runtime.block_on(join::run(options, Console::from_stdin(), spawn_ctrl_c()))
         }

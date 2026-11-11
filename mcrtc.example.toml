@@ -10,6 +10,11 @@
 # max_connections = 16         # host: connections per friend
 # whitelist_file = "ids.txt"   # host: allowed mcrtc IDs
 # identity = "mcrtc-id.pem"    # join: keeps your mcrtc ID stable
+# world = "./server"           # host: share this Java world (or server folder) with friends
+# sync_interval = 300          # host: seconds between world snapshots
+# rcon_address = "127.0.0.1:25575"  # host: defaults to the server's server.properties
+# rcon_password = "secret"
+# sync_path = "./host-world"   # join: keep a copy of the host's world here
 
 # [[turn]]
 # url = "turn:turn.example.com:3478?transport=udp"

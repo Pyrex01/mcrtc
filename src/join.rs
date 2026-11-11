@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,7 @@ use crate::events::{Event, Reporter};
 use crate::host::report_stats;
 use crate::invite::{Payload, PayloadType, DEFAULT_TTL};
 use crate::peer::{certificate_id, generate_certificate, ChannelHandler, Peer, PeerOptions};
+use crate::sync;
 
 /// The host needs time to receive and paste the reply, so this is as long as a reply stays valid.
 const CONNECT_TIMEOUT: Duration = DEFAULT_TTL;
@@ -45,6 +47,8 @@ pub struct JoinOptions {
     pub listen: String,
     pub raw_json: bool,
     pub reporter: Reporter,
+    /// Keeps a copy of the host's world here.
+    pub sync_path: Option<PathBuf>,
 }
 
 /// Where Minecraft connects. Bedrock takes the same port on both protocols, because a server is
@@ -198,7 +202,8 @@ impl Tunnel {
     }
 }
 
-/// Hands the host's `control` channel to `control` and refuses anything else.
+/// Hands the host's `control` channel to `control` and refuses anything else. The world channel
+/// is negotiated, so it never shows up here.
 fn control_handler(control: mpsc::Sender<Arc<dyn DataChannel>>) -> ChannelHandler {
     Arc::new(move |channel| {
         let control = control.clone();
@@ -223,6 +228,9 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let reporter = options.reporter.clone();
+    if options.sync_path.is_some() && options.edition == Edition::Bedrock {
+        bail!("world sync only supports Java Edition so far");
+    }
     // Bind first: finding out the port is taken is better before the invite dance than after it.
     let listener = Listener::bind(options.edition, &options.listen)
         .await
@@ -311,13 +319,20 @@ pub async fn run(
         measured,
         reporter.clone(),
     );
+    let world = async {
+        if let Some(path) = options.sync_path {
+            sync::follow(&peer, control.as_ref(), &pending, path, &reporter).await;
+        }
+        std::future::pending::<()>().await
+    };
     let end = tokio::select! {
-        end = control::run(control, Role::Joiner(pending), shutdown, rtt) => end,
+        end = control::run(control.clone(), Role::Joiner(pending.clone()), shutdown, rtt) => end,
         state = peer.wait_lost() => {
             debug!(%state, "connection lost");
             ControlEnd::Closed
         }
         () = stats => ControlEnd::Closed,
+        () = world => ControlEnd::Closed,
     };
 
     stop_serving.send_replace(true);

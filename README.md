@@ -131,7 +131,8 @@ mcrtc                                    Open the interface
 mcrtc ui
 mcrtc host [--server 127.0.0.1:25565] [--whitelist-file ids.txt]
            [--max-peers N] [--max-connections N]
-mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem]
+           [--world ./world] [--sync-interval 300] [--rcon-address ADDR] [--rcon-password PASS]
+mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem] [--sync-path ./host-world]
 
 Common: --edition java|bedrock, --config mcrtc.toml, --stun <url> (repeatable),
         --turn <url> --turn-user <u> --turn-pass <p>, --raw-json, -v
@@ -159,6 +160,30 @@ A reply is refused unless every fingerprint in it is listed. The DTLS handshake 
 friend owns that certificate, so an ID cannot be faked by copying it. Without `--identity`, a new
 ID is generated on every run. In the interface, set `whitelist_file` and `identity` in a config
 file and start it with `mcrtc ui --config mcrtc.toml`.
+
+## Keeping a copy of the world
+
+A Java host can let friends keep a copy of the world, so they can start their own server from it
+when the host is away. It is opt-in on both sides:
+
+1. In the host's `server.properties`, set `enable-rcon=true` and an `rcon.password`, then restart
+   the server. Keep the RCON port closed on your firewall: mcrtc only uses it on `127.0.0.1`.
+2. The host runs `mcrtc host --world <server folder or world folder>`, or fills in *World Folder
+   to Share* in the interface. RCON settings are read from `server.properties` next to the world.
+3. A friend runs `mcrtc join --sync-path ./host-world`, or fills in *Keep a Copy of the World In*.
+
+Every `--sync-interval` seconds (300 by default), while someone is syncing, mcrtc turns saving off
+over RCON, flushes the world, copies the files that changed into a hidden mirror next to the world
+folder, and turns saving back on. Friends then get only those changed files, read from the
+mirror, so the first sync sends the whole world and later ones usually a few region files. The
+copy is written to a staging folder and moved into place only once complete, so it is always one
+whole snapshot, even if mcrtc is killed halfway. If a friend's copy changed locally, for example
+because they played on it, it is moved to `<folder>.backup-<time>` and copied again in full,
+never overwritten. Without RCON, sync still works but warns that a snapshot can catch the server
+mid-save.
+
+Costs: the host's mirror takes as much disk as the world. Nothing is compressed or held in memory
+whole, and transfers keep at most 128 KB in flight so they do not delay gameplay packets.
 
 ## How it works
 
@@ -227,6 +252,8 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
   still has to cross both routers without mcrtc's help. `online-mode=false` turns the signaling
   port off, and `transport=raknet` logs that players cannot connect. A scripted RakNet handshake
   does get accepted by that server through the tunnel.
+- World sync is Java only. Bedrock servers have no RCON, so there is no safe way yet to pause
+  their saving from outside the server.
 - Consoles cannot run mcrtc. Phones and tablets cannot either, so they would need it running on a
   PC on the same network, with `--listen` set to an address they can reach.
 

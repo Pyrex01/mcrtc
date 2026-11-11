@@ -2,6 +2,7 @@
 //! through a [`Console`] and [`Event`]s come out on a channel the window drains every frame.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{mpsc as std_mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ use crate::events::{Event, Reporter};
 use crate::host::{self, HostOptions};
 use crate::join::{self, JoinOptions};
 use crate::peer::PeerOptions;
+use crate::sync::SyncOptions;
 
 const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -29,6 +31,9 @@ pub struct UiOptions {
     pub max_peers: Option<usize>,
     pub max_connections: Option<usize>,
     pub whitelist: Option<HashSet<String>>,
+    /// From the config file. The window's folder fields override the folders.
+    pub sync: Option<SyncOptions>,
+    pub sync_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +54,8 @@ pub struct Settings {
     pub turn_url: String,
     pub turn_user: String,
     pub turn_pass: String,
+    pub world: String,
+    pub sync_path: String,
 }
 
 struct Session {
@@ -102,6 +109,17 @@ impl Sessions {
         } else {
             edition.default_address()
         }
+    }
+
+    pub fn default_world(&self) -> Option<&std::path::Path> {
+        self.options
+            .sync
+            .as_ref()
+            .map(|sync| sync.world_path.as_path())
+    }
+
+    pub fn default_sync_path(&self) -> Option<&std::path::Path> {
+        self.options.sync_path.as_deref()
     }
 
     fn resolve_ice(&self, settings: &Settings) -> Result<IceConfig> {
@@ -162,6 +180,22 @@ impl Sessions {
         let max_peers = settings.max_peers.or(self.options.max_peers);
         let max_connections = settings.max_connections.or(self.options.max_connections);
         let whitelist = self.options.whitelist.clone();
+        let sync = match settings.world.trim() {
+            "" => self.options.sync.clone(),
+            world => Some(SyncOptions {
+                world_path: world.into(),
+                ..self.options.sync.clone().unwrap_or(SyncOptions {
+                    world_path: PathBuf::new(),
+                    interval_secs: crate::sync::DEFAULT_INTERVAL_SECS,
+                    rcon_address: None,
+                    rcon_password: None,
+                })
+            }),
+        };
+        let sync_path = match settings.sync_path.trim() {
+            "" => self.options.sync_path.clone(),
+            path => Some(path.into()),
+        };
         let running = self.session.clone();
         self.runtime.spawn(async move {
             let result = match mode {
@@ -175,6 +209,7 @@ impl Sessions {
                         whitelist,
                         raw_json: false,
                         reporter: reporter.clone(),
+                        sync,
                     };
                     host::run(options, console, stopped).await
                 }
@@ -185,6 +220,7 @@ impl Sessions {
                         listen,
                         raw_json: false,
                         reporter: reporter.clone(),
+                        sync_path,
                     };
                     join::run(options, console, stopped).await
                 }

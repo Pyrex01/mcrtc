@@ -7,8 +7,8 @@ android {
         applicationId = "com.mcrtc.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.0"
+        versionCode = 4
+        versionName = "0.3.0"
         // One universal APK: libwebrtc ships a native library for each of these.
         ndk { abiFilters += setOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86") }
     }

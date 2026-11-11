@@ -23,6 +23,8 @@ const PONG: &str = "pong";
 const BYE: &str = "bye";
 const OPEN: &str = "open";
 const OPEN_DATAGRAMS: &str = "open-datagrams";
+/// The joiner asks for the host's world. Hosts that do not share one never answer.
+const OPEN_WORLD: &str = "open-world";
 const READY: &str = "ready";
 const REFUSED: &str = "refused";
 
@@ -55,6 +57,8 @@ pub fn channel_label(id: u64) -> String {
 pub enum Transport {
     Stream,
     Datagrams,
+    /// The world sync channel, see [`crate::sync`].
+    World,
 }
 
 impl Transport {
@@ -62,6 +66,7 @@ impl Transport {
         match self {
             Self::Stream => OPEN,
             Self::Datagrams => OPEN_DATAGRAMS,
+            Self::World => OPEN_WORLD,
         }
     }
 }
@@ -131,6 +136,7 @@ impl Role {
         match (self, word) {
             (Role::Host(on_open), OPEN) => on_open(id, Transport::Stream),
             (Role::Host(on_open), OPEN_DATAGRAMS) => on_open(id, Transport::Datagrams),
+            (Role::Host(on_open), OPEN_WORLD) => on_open(id, Transport::World),
             (Role::Joiner(pending), READY) => pending.resolve(id, true),
             (Role::Joiner(pending), REFUSED) => pending.resolve(id, false),
             _ => debug!(word, "ignoring unexpected control message"),
@@ -277,9 +283,14 @@ mod tests {
         }));
         role.handle("open 3");
         role.handle("open-datagrams 6");
+        role.handle("open-world 18446744073709551615");
         role.handle("ready 4");
         joiner_role().handle("open 5");
-        let expected = [(3, Transport::Stream), (6, Transport::Datagrams)];
+        let expected = [
+            (3, Transport::Stream),
+            (6, Transport::Datagrams),
+            (u64::MAX, Transport::World),
+        ];
         assert_eq!(*seen.lock().unwrap(), expected);
     }
 
