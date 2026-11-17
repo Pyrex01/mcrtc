@@ -4,6 +4,7 @@ use shared::error::{Error, Result};
 
 use crate::AssociationError;
 use crate::association::state::{AckMode, AssociationState};
+use crate::association::timer::ACK_INTERVAL;
 use crate::association::stream::{ReliabilityType, Stream};
 use crate::chunk::chunk_abort::ChunkAbort;
 use crate::chunk::chunk_cookie_echo::ChunkCookieEcho;
@@ -2473,9 +2474,10 @@ fn test_assoc_delayed_ack() -> Result<()> {
             n_packets_received += 1;
         }
     }
-    let delay = (pair.time.duration_since(since).as_millis() as f64) / 1000.0;
-    debug!("received in {} seconds", delay);
-    assert!(delay >= 0.2, "should be >= 200msec");
+    let delay = pair.time.duration_since(since).as_millis() as u64;
+    debug!("received in {} msec", delay);
+    // mcrtc: follows the shortened delayed-ack interval.
+    assert!(delay >= ACK_INTERVAL, "should be >= {ACK_INTERVAL} msec");
 
     pair.drive();
 

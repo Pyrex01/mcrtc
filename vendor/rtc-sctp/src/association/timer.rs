@@ -1,6 +1,8 @@
 use std::time::{Duration, Instant};
 
-pub(crate) const ACK_INTERVAL: u64 = 200;
+// mcrtc: upstream holds a SACK for up to 200 ms. Minecraft sends few, small messages, so the
+// sender often waits out that delay before it learns of a loss or may grow its window.
+pub(crate) const ACK_INTERVAL: u64 = 50;
 const MAX_INIT_RETRANS: usize = 8;
 const PATH_MAX_RETRANS: usize = 5;
 const NO_MAX_RETRANS: usize = usize::MAX;
@@ -170,7 +172,9 @@ impl TimerTable {
 // RFC 9260 §16 recommends a one-second initial RTO.  This value is used by
 // both T1-init and T1-cookie before an RTT measurement is available.
 const RTO_INITIAL: u64 = 1000; // msec
-const RTO_MIN: u64 = 1000; // msec
+// mcrtc: with a one-second floor, every lost packet froze its ordered channel, and everything
+// queued behind it, for at least a second. The RTO still follows srtt + 4 * rttvar above this.
+const RTO_MIN: u64 = 200; // msec
 // mcrtc: 60 seconds meant a link that came back could sit idle for up to a minute before the
 // next retransmission. WebRTC stacks commonly cap it far lower for interactive traffic.
 const RTO_MAX: u64 = 5000; // msec
