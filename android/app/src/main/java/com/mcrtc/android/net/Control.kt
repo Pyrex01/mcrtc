@@ -4,6 +4,7 @@
 package com.mcrtc.android.net
 
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
@@ -26,8 +27,13 @@ private const val REFUSED = "refused"
 
 private const val PING_INTERVAL_MS = 5_000L
 
-/** Longer than the bridge's write stall timeout, since a stalled stream delays this channel too. */
-private const val PEER_TIMEOUT_MS = 45_000L
+/** How long a silent peer is waited for. Weak links drop out for tens of seconds and come back on
+ *  the same route, and riding that out is far cheaper than a new invite. A clean exit is still
+ *  noticed at once, through the goodbye. Matches `PEER_TIMEOUT` in `src/control.rs`. */
+private const val PEER_TIMEOUT_MS = 300_000L
+
+/** Silence after which the ping is cleared, so the screen shows the link is down. */
+private const val QUIET_AFTER_MS = 15_000L
 
 private const val BYE_FLUSH_TIMEOUT_MS = 1_000L
 
@@ -117,6 +123,7 @@ suspend fun runControl(
     val end = CompletableDeferred<ControlEnd>()
     val lastHeard = AtomicLong(System.nanoTime())
     val pingSent = AtomicLong(0)
+    val quiet = AtomicBoolean(false)
 
     val stopper = launch {
         shutdown.first { it }
@@ -125,10 +132,12 @@ suspend fun runControl(
     }
     val pinger = launch {
         while (true) {
-            if (System.nanoTime() - lastHeard.get() > PEER_TIMEOUT_MS * 1_000_000) {
+            val silence = System.nanoTime() - lastHeard.get()
+            if (silence > PEER_TIMEOUT_MS * 1_000_000) {
                 end.complete(ControlEnd.TimedOut)
                 break
             }
+            if (silence > QUIET_AFTER_MS * 1_000_000 && !quiet.getAndSet(true)) rtt.value = null
             // Failing here only means the channel is not open yet.
             if (channel.sendText(PING)) pingSent.set(System.nanoTime())
             delay(PING_INTERVAL_MS)
@@ -138,6 +147,7 @@ suspend fun runControl(
         while (true) {
             val data = channel.receive() ?: break
             lastHeard.set(System.nanoTime())
+            quiet.set(false)
             when (val message = String(data)) {
                 PING -> channel.sendText(PONG)
                 BYE -> {

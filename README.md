@@ -219,8 +219,16 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
 - **ICE keeps probing for the whole life of an invite.** The library defaults give up after 30
   seconds, and a person pasting a reply can take minutes. The probes are also what keeps the
   friend's NAT open for the host.
-- **The heartbeat detects dead peers**, within 45 seconds, because the ICE failure timeout had to
-  be raised for the reason above. A clean exit is noticed immediately.
+- **The heartbeat waits out outages.** A weak Wi-Fi or mobile link can go silent for tens of
+  seconds and come back on the same route, and keeping the tunnel is much cheaper than a new
+  invite. After 15 quiet seconds the ping is cleared and the log says so; the session only ends
+  after 5 minutes of silence. Minecraft itself drops a connection after 30 seconds, but the player
+  can then reconnect through the same tunnel. A clean exit is noticed immediately.
+- **SCTP is patched to keep retransmitting** (see
+  [vendor/rtc-sctp/MCRTC-PATCH.md](vendor/rtc-sctp/MCRTC-PATCH.md)). The library stops resending
+  data after 5 timeouts without closing the connection, so after about 30 seconds of outage every
+  channel stalled for good, and it backed off for up to 60 seconds between tries. Now it retries
+  forever, at most 5 seconds apart, so traffic resumes within seconds of the link coming back.
 - **A TCP write stalled for 30 seconds closes that connection.** One full channel makes the library
   stop reading the whole connection, so a stuck socket must not be allowed to freeze a friend's
   other streams.
@@ -245,7 +253,11 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
   tell friends apart. Use the server's whitelist and UUID bans instead. `online-mode=true` works
   as usual.
 - A connection stuck for up to 30 seconds can delay that friend's other connections.
-- mcrtc does not reconnect. If a connection drops, make a new invite.
+- mcrtc rides out outages of up to 5 minutes on the same network route, but it cannot follow a
+  change of address, for example switching from Wi-Fi to mobile data or a router restart that
+  changes the public IP. Then make a new invite. On Android, libwebrtc drops a route after 30
+  seconds without answers and only gets it back because a desktop peer keeps checking, so a phone
+  connected to another phone does not recover from outages longer than that.
 - **Bedrock has not been tested with the game itself, and NetherNet may not get through.** A
   1.26.62 dedicated server defaults to `transport=nethernet`. mcrtc carries its HTTP signaling,
   but gameplay is the game's own WebRTC connecting straight to the server, so that connection

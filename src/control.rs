@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio::sync::{oneshot, watch};
 use tokio::time::{interval, sleep, timeout, Instant, MissedTickBehavior};
-use tracing::debug;
+use tracing::{debug, info, warn};
 use webrtc::data_channel::{DataChannel, DataChannelEvent};
 
 pub const LABEL: &str = "control";
@@ -30,8 +30,15 @@ const REFUSED: &str = "refused";
 
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Longer than the bridge's write stall timeout, since a stalled stream delays this channel too.
-const PEER_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a silent peer is waited for. Weak links and Wi-Fi hiccups drop out for tens of seconds
+/// and come back on the same route, and riding that out is far cheaper than a new invite. A
+/// Minecraft connection still times out after 30 seconds, but the tunnel survives for the player
+/// to reconnect. A clean exit is still noticed at once, through the goodbye.
+const PEER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Silence after which the ping is cleared and the outage logged. It only reports, never
+/// disconnects.
+const QUIET_AFTER: Duration = Duration::from_secs(15);
 
 const BYE_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -151,15 +158,19 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
     rtt: watch::Sender<Option<Duration>>,
 ) -> ControlEnd {
-    run_with(
-        channel,
-        role,
-        &mut shutdown,
-        &rtt,
-        PING_INTERVAL,
-        PEER_TIMEOUT,
-    )
-    .await
+    let timing = Timing {
+        ping_interval: PING_INTERVAL,
+        quiet_after: QUIET_AFTER,
+        peer_timeout: PEER_TIMEOUT,
+    };
+    run_with(channel, role, &mut shutdown, &rtt, timing).await
+}
+
+#[derive(Clone, Copy)]
+struct Timing {
+    ping_interval: Duration,
+    quiet_after: Duration,
+    peer_timeout: Duration,
 }
 
 async fn run_with(
@@ -167,13 +178,13 @@ async fn run_with(
     role: Role,
     shutdown: &mut watch::Receiver<bool>,
     rtt: &watch::Sender<Option<Duration>>,
-    ping_interval: Duration,
-    peer_timeout: Duration,
+    timing: Timing,
 ) -> ControlEnd {
-    let mut ticker = interval(ping_interval);
+    let mut ticker = interval(timing.ping_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut last_heard = Instant::now();
     let mut ping_sent = None;
+    let mut quiet = false;
 
     loop {
         tokio::select! {
@@ -182,8 +193,17 @@ async fn run_with(
                 return ControlEnd::Shutdown;
             }
             _ = ticker.tick() => {
-                if last_heard.elapsed() > peer_timeout {
+                let silence = last_heard.elapsed();
+                if silence > timing.peer_timeout {
                     return ControlEnd::TimedOut;
+                }
+                if silence > timing.quiet_after && !quiet {
+                    quiet = true;
+                    rtt.send_replace(None);
+                    warn!(
+                        "the other side went quiet, waiting up to {} minutes for it to come back",
+                        timing.peer_timeout.as_secs() / 60
+                    );
                 }
                 // Failing here only means the channel is not open yet.
                 if channel.send_text(PING).await.is_ok() {
@@ -193,6 +213,10 @@ async fn run_with(
             event = channel.poll() => match event {
                 Some(DataChannelEvent::OnMessage(message)) => {
                     last_heard = Instant::now();
+                    if quiet {
+                        quiet = false;
+                        info!("the connection recovered");
+                    }
                     match message.data.as_ref() {
                         data if data == PING.as_bytes() => {
                             let _ = channel.send_text(PONG).await;
@@ -347,21 +371,18 @@ mod tests {
         let (stop_remote, mut remote_stop) = watch::channel(false);
         let beat = Duration::from_millis(50);
         let patience = Duration::from_millis(500);
+        let timing = Timing {
+            ping_interval: beat,
+            quiet_after: Duration::from_millis(200),
+            peer_timeout: patience,
+        };
 
         let remote_task = tokio::spawn(async move {
-            run_with(
-                remote,
-                joiner_role(),
-                &mut remote_stop,
-                &no_rtt(),
-                beat,
-                patience,
-            )
-            .await
+            run_with(remote, joiner_role(), &mut remote_stop, &no_rtt(), timing).await
         });
         let (rtt, measured) = watch::channel(None);
         let local_task = tokio::spawn(async move {
-            run_with(local, joiner_role(), &mut local_stop, &rtt, beat, patience).await
+            run_with(local, joiner_role(), &mut local_stop, &rtt, timing).await
         });
 
         // Several multiples of the timeout pass without either side giving up.
@@ -376,11 +397,150 @@ mod tests {
         // Stop the remote side's answers without a goodbye reaching anyone.
         remote_task.abort();
         drop(stop_remote);
+        // Going quiet clears the ping before the session is given up.
+        sleep(Duration::from_millis(350)).await;
+        assert!(!local_task.is_finished());
+        assert!(
+            measured.borrow().is_none(),
+            "a quiet peer should clear the ping"
+        );
         let end = timeout(Duration::from_secs(5), local_task)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(end, ControlEnd::TimedOut);
+        offerer.close().await;
+        answerer.close().await;
+    }
+
+    /// Points every candidate in `sdp` at `address`.
+    fn redirect_candidates(sdp: &str, address: std::net::SocketAddr) -> String {
+        sdp.split_inclusive('\n')
+            .map(|line| {
+                if !line.starts_with("a=candidate:") {
+                    return line.to_owned();
+                }
+                let mut fields: Vec<String> =
+                    line.trim_end().split(' ').map(str::to_owned).collect();
+                fields[4] = address.ip().to_string();
+                fields[5] = address.port().to_string();
+                fields.join(" ") + "\r\n"
+            })
+            .collect()
+    }
+
+    fn candidate_address(sdp: &str) -> std::net::SocketAddr {
+        let line = sdp
+            .lines()
+            .find(|line| line.starts_with("a=candidate:"))
+            .unwrap();
+        let fields: Vec<_> = line.split(' ').collect();
+        format!("{}:{}", fields[4], fields[5]).parse().unwrap()
+    }
+
+    /// Forwards UDP between two peers, dropping everything while `cut` is true. `a` reaches the
+    /// first socket, which forwards to `b`; the reverse goes through the second.
+    async fn cuttable_link(
+        to_a: std::net::SocketAddr,
+        to_b: watch::Receiver<Option<std::net::SocketAddr>>,
+        cut: watch::Receiver<bool>,
+    ) -> (std::net::SocketAddr, std::net::SocketAddr) {
+        use tokio::net::UdpSocket;
+        let toward_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let toward_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addresses = (
+            toward_a.local_addr().unwrap(),
+            toward_b.local_addr().unwrap(),
+        );
+        tokio::spawn(async move {
+            let (mut from_b, mut from_a) = (vec![0; 2048], vec![0; 2048]);
+            loop {
+                tokio::select! {
+                    Ok((read, _)) = toward_a.recv_from(&mut from_b) => {
+                        let open = !*cut.borrow();
+                        if open {
+                            let _ = toward_b.send_to(&from_b[..read], to_a).await;
+                        }
+                    }
+                    Ok((read, _)) = toward_b.recv_from(&mut from_a) => {
+                        let (closed, to_b) = (*cut.borrow(), *to_b.borrow());
+                        if let (false, Some(to_b)) = (closed, to_b) {
+                            let _ = toward_a.send_to(&from_a[..read], to_b).await;
+                        }
+                    }
+                }
+            }
+        });
+        addresses
+    }
+
+    /// Runs with the real timings, so it takes over a minute: `cargo test -- --ignored`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn a_session_rides_out_a_40_second_outage() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let offerer = Peer::new(PeerOptions::loopback(), ignore_channels())
+            .await
+            .unwrap();
+        let answerer = Peer::new(
+            PeerOptions::loopback(),
+            Arc::new(move |channel| {
+                let _ = tx.send(channel);
+            }),
+        )
+        .await
+        .unwrap();
+        let local = offerer.create_channel(LABEL).await.unwrap();
+
+        // Each side only knows the relay, so every packet crosses it.
+        let offer = offerer.create_offer().await.unwrap();
+        let (cut, cut_rx) = watch::channel(false);
+        let (set_answerer, answerer_address) = watch::channel(None);
+        let (offerer_side, answerer_side) =
+            cuttable_link(candidate_address(&offer), answerer_address, cut_rx).await;
+        let answer = answerer
+            .accept_offer(redirect_candidates(&offer, offerer_side))
+            .await
+            .unwrap();
+        set_answerer.send_replace(Some(candidate_address(&answer)));
+        offerer
+            .accept_answer(redirect_candidates(&answer, answerer_side))
+            .await
+            .unwrap();
+        offerer
+            .wait_connected(Duration::from_secs(20))
+            .await
+            .unwrap();
+        let remote = timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (_stop_local, local_stop) = watch::channel(false);
+        let (_stop_remote, remote_stop) = watch::channel(false);
+        let (rtt, mut measured) = watch::channel(None);
+        let local_task = tokio::spawn(run(local, joiner_role(), local_stop, rtt));
+        let remote_task = tokio::spawn(run(remote, joiner_role(), remote_stop, no_rtt()));
+        timeout(Duration::from_secs(15), measured.wait_for(Option::is_some))
+            .await
+            .unwrap()
+            .unwrap();
+
+        cut.send_replace(true);
+        sleep(Duration::from_secs(40)).await;
+        assert!(
+            measured.borrow().is_none(),
+            "the outage should clear the ping"
+        );
+        cut.send_replace(false);
+
+        timeout(Duration::from_secs(20), measured.wait_for(Option::is_some))
+            .await
+            .expect("pings should resume soon after the link comes back")
+            .unwrap();
+        assert!(!local_task.is_finished() && !remote_task.is_finished());
+        local_task.abort();
+        remote_task.abort();
         offerer.close().await;
         answerer.close().await;
     }

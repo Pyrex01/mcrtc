@@ -171,9 +171,14 @@ class Peer(factory: PeerConnectionFactory, ice: IceConfig, onChannel: (RtcChanne
         }
     }
 
-    /** Resolves once the connection is gone for good. */
+    /**
+     * Resolves once the connection is gone for good. libwebrtc drops a candidate pair after 30
+     * seconds without answers and reports failed, but a desktop peer keeps checking for minutes and
+     * the pair comes back when the link does, so only a close counts. The control heartbeat
+     * catches a peer that never returns.
+     */
     suspend fun waitLost(): PeerConnectionState =
-        state.first { it == PeerConnectionState.FAILED || it == PeerConnectionState.CLOSED }
+        state.first { it == PeerConnectionState.CLOSED }
 
     /** How the connection is routed, like `host <-> srflx (direct)`, available once connected. */
     suspend fun route(): String? {
