@@ -498,14 +498,18 @@ fn signal(ping: Option<u64>) -> usize {
     }
 }
 
-fn ping_bars(ui: &Ui, right_top: Pos2, ping: Option<u64>) -> Rect {
-    const HEIGHTS: [f32; 5] = [2.0, 3.0, 5.0, 6.0, 8.0];
-    let lit = signal(ping);
-    let color = match lit {
+fn signal_color(lit: usize) -> Color32 {
+    match lit {
         4.. => GREEN,
         2.. => YELLOW,
         _ => RED,
-    };
+    }
+}
+
+fn ping_bars(ui: &Ui, right_top: Pos2, ping: Option<u64>) -> Rect {
+    const HEIGHTS: [f32; 5] = [2.0, 3.0, 5.0, 6.0, 8.0];
+    let lit = signal(ping);
+    let color = signal_color(lit);
     let area = Rect::from_min_size(right_top - vec2(14.0, 0.0), vec2(14.0, 8.0));
     for (index, height) in HEIGHTS.into_iter().enumerate() {
         let x = area.left() + index as f32 * 3.0;
@@ -551,7 +555,18 @@ pub fn list_entry(ui: &mut Ui, theme: &Theme, name: &str, detail: &str, ping: Op
     let top = inner.top() + 1.0 - CAP_TOP;
     let galley = layout_line(ui, name, WHITE, text_width - 20.0);
     paint_text(ui.painter(), pos2(left, top), galley, WHITE);
-    let galley = layout_line(ui, detail, MUTED, text_width);
+
+    // The ping in ms sits under the bars, on the detail row, and the detail gives way to it.
+    let mut detail_width = text_width;
+    if let Some(ping) = ping {
+        let color = signal_color(signal(Some(ping)));
+        let galley = layout_line(ui, &format!("{ping} ms"), color, f32::INFINITY);
+        let width = galley.size().x;
+        detail_width -= width + 6.0;
+        let pos = pos2((inner.right() - 1.0 - width).round(), top + 12.0);
+        paint_text(ui.painter(), pos, galley, color);
+    }
+    let galley = layout_line(ui, detail, MUTED, detail_width);
     paint_text(ui.painter(), pos2(left, top + 12.0), galley, MUTED);
 
     let bars = ping_bars(ui, inner.right_top() + vec2(-1.0, 1.0), ping);
