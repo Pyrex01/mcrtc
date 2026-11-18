@@ -229,7 +229,8 @@ sender. A `control` channel carries a heartbeat, connection setup, and a clean g
   data after 5 timeouts without closing the connection, so after about 30 seconds of outage every
   channel stalled for good, and it backed off for up to 60 seconds between tries. Now it retries
   forever, at most 5 seconds apart, so traffic resumes within seconds of the link coming back.
-  It also resends a lost packet after 200 ms at the earliest instead of a full second, and
+  It also resends a lost packet as soon as its acknowledgement is overdue, measured from the
+  connection's own ping (about 110 ms on a 30 ms link) instead of after a fixed second, and
   acknowledges within 50 ms instead of 200, so a dropped packet on Wi-Fi or mobile no longer
   freezes the game for a second.
 - **A TCP write stalled for 30 seconds closes that connection.** One full channel makes the library

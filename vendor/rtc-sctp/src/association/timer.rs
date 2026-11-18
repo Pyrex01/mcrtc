@@ -173,8 +173,12 @@ impl TimerTable {
 // both T1-init and T1-cookie before an RTT measurement is available.
 const RTO_INITIAL: u64 = 1000; // msec
 // mcrtc: with a one-second floor, every lost packet froze its ordered channel, and everything
-// queued behind it, for at least a second. The RTO still follows srtt + 4 * rttvar above this.
-const RTO_MIN: u64 = 200; // msec
+// queued behind it, for at least a second. The floor now follows the measured RTT instead (see
+// rto_floor), and this is only its absolute lower bound.
+const RTO_MIN: u64 = 80; // msec
+// mcrtc: headroom above srtt + ACK_INTERVAL, so a steady link whose rttvar has shrunk to almost
+// nothing does not resend a packet whose SACK is merely delayed or a little late.
+const RTO_MARGIN: u64 = 30; // msec
 // mcrtc: 60 seconds meant a link that came back could sit idle for up to a minute before the
 // next retransmission. WebRTC stacks commonly cap it far lower for interactive traffic.
 const RTO_MAX: u64 = 5000; // msec
@@ -219,7 +223,7 @@ impl RtoManager {
             self.srtt = ((RTO_BASE - RTO_ALPHA) * self.srtt + RTO_ALPHA * rtt) / RTO_BASE;
         }
 
-        self.rto = (self.srtt + (4.0 * self.rttvar) as u64).clamp(RTO_MIN, RTO_MAX);
+        self.rto = (self.srtt + (4.0 * self.rttvar) as u64).clamp(rto_floor(self.srtt), RTO_MAX);
 
         self.srtt
     }
@@ -254,6 +258,13 @@ impl RtoManager {
     }
 }
 
+/// mcrtc: the lowest RTO for a given smoothed RTT. A fixed floor was either too slow for a fast
+/// link or too eager for a slow one; this one never fires before a SACK delayed by the peer's
+/// ACK_INTERVAL could arrive.
+fn rto_floor(srtt: u64) -> u64 {
+    (srtt + ACK_INTERVAL + RTO_MARGIN).clamp(RTO_MIN, RTO_MAX)
+}
+
 fn calculate_next_timeout(rto: u64, n_rtos: usize) -> u64 {
     // RFC 4096 sec 6.3.3.  Handle T3-rtx Expiration
     //   E2)  For the destination address for which the timer expires, set RTO
@@ -283,6 +294,33 @@ mod tests {
         rto.set_rto(RTO_MAX - 1, false);
         rto.backoff();
         assert_eq!(RTO_MAX, rto.get_rto());
+    }
+
+    #[test]
+    fn rto_floor_follows_rtt() {
+        // A steady 30 ms link resends after 110 ms, not a fixed 200.
+        let mut rto = RtoManager::new();
+        for _ in 0..50 {
+            rto.set_new_rtt(30);
+        }
+        assert_eq!(30 + ACK_INTERVAL + RTO_MARGIN, rto.get_rto());
+
+        // A steady 250 ms link waits for a delayed SACK instead of resending early.
+        let mut rto = RtoManager::new();
+        for _ in 0..50 {
+            rto.set_new_rtt(250);
+        }
+        assert_eq!(250 + ACK_INTERVAL + RTO_MARGIN, rto.get_rto());
+
+        // Jitter still raises the RTO above the floor.
+        let mut rto = RtoManager::new();
+        for i in 0..50 {
+            rto.set_new_rtt(if i % 2 == 0 { 20 } else { 120 });
+        }
+        assert!(rto.get_rto() > rto_floor(rto.srtt));
+
+        assert_eq!(RTO_MIN, rto_floor(0));
+        assert_eq!(RTO_MAX, rto_floor(10_000));
     }
 
     #[test]
