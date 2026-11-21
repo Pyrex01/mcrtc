@@ -8,8 +8,10 @@ mod session;
 mod state;
 #[cfg(test)]
 mod tests;
+mod updates;
 mod widgets;
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, OnceLock};
 use std::time::Duration;
@@ -29,6 +31,7 @@ use crate::events::Event;
 pub use session::UiOptions;
 use session::{Mode, Sessions};
 use state::{clean_paste, describe_route, Message, Screen, State};
+use updates::{Status, Updates};
 use widgets::{Theme, BUTTON_HEIGHT, COLUMN, GAP, MUTED, RED, WHITE, YELLOW};
 
 const SPLASHES: [&str; 10] = [
@@ -82,6 +85,8 @@ pub fn run(options: UiOptions, runtime: Handle, mut shutdown: watch::Receiver<bo
         ..Default::default()
     };
     let session_handle = sessions.clone();
+    let restart = Arc::new(OnceLock::new());
+    let restart_handle = restart.clone();
     let result = eframe::run_native(
         "mcrtc",
         native_options,
@@ -94,14 +99,20 @@ pub fn run(options: UiOptions, runtime: Handle, mut shutdown: watch::Receiver<bo
                 closing.send_viewport_cmd(ViewportCommand::Close);
                 closing.request_repaint();
             });
-            Ok(Box::new(App::new(&ctx, session_handle, events)))
+            let mut app = App::new(&ctx, session_handle, events);
+            app.restart = restart_handle;
+            Ok(Box::new(app))
         }),
     );
     // Closing the window ends the session, and friends still deserve a goodbye.
     sessions.shut_down();
     result.map_err(|error| {
         anyhow!("could not open a window: {error}. `mcrtc host` and `mcrtc join` work without one")
-    })
+    })?;
+    if let Some(exe) = restart.get() {
+        crate::update::restart(exe)?;
+    }
+    Ok(())
 }
 
 /// The largest whole scale that keeps a 320x240 screen in the window, like GUI Scale: Auto.
@@ -121,6 +132,9 @@ struct App {
     shown: Option<Screen>,
     /// True on the first frame of a screen.
     entering: bool,
+    updates: Updates,
+    /// Set to the updated binary when the window closes to start it.
+    restart: Arc<OnceLock<PathBuf>>,
 }
 
 fn random_splash() -> &'static str {
@@ -137,6 +151,11 @@ impl App {
         widgets::install_style(ctx);
         let mut state = State::default();
         state.forms.edition = sessions.first_edition();
+        let updates = if sessions.check_updates() {
+            Updates::check(&sessions)
+        } else {
+            Updates::default()
+        };
         Self {
             state,
             sessions,
@@ -147,6 +166,8 @@ impl App {
             copied: None,
             shown: None,
             entering: true,
+            updates,
+            restart: Arc::default(),
         }
     }
 
@@ -163,7 +184,12 @@ impl App {
                 self.send(line);
             }
         }
-        if let Some(text) = self.state.toast.take() {
+        if let Some(text) = self
+            .state
+            .toast
+            .take()
+            .or_else(|| self.updates.take_failure())
+        {
             self.toast = Some((text, now));
         }
     }
@@ -411,6 +437,7 @@ impl App {
             Some(_) => ui.ctx().send_viewport_cmd(ViewportCommand::Close),
             None => {}
         }
+        self.update_button(ui, column(row_top(4.0)));
 
         let painter = ui.painter();
         let bottom = screen.bottom() - 10.0;
@@ -433,6 +460,28 @@ impl App {
             WHITE,
         );
         ui.ctx().request_repaint_after(ANIMATION_FRAME);
+    }
+
+    /// Shown under the menu once a newer release turns up.
+    fn update_button(&mut self, ui: &mut Ui, rect: Rect) {
+        let status = self.updates.status();
+        let (label, enabled) = match &status {
+            Status::None => return,
+            Status::Available(release) => (format!("Update to {}", release.version), true),
+            Status::Installing(_) => ("Updating...".to_owned(), false),
+            Status::Installed { .. } => ("Restart to Update".to_owned(), true),
+        };
+        let mut row = ui.new_child(UiBuilder::new().id_salt("update").max_rect(rect));
+        if !widgets::button(&mut row, &self.theme, &label, COLUMN, enabled).clicked() {
+            return;
+        }
+        match status {
+            Status::Installed { exe, .. } => {
+                let _ = self.restart.set(exe);
+                ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+            }
+            _ => self.updates.install(&self.sessions),
+        }
     }
 
     fn host_setup(&mut self, ui: &mut Ui) {

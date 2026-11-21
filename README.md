@@ -133,6 +133,7 @@ mcrtc host [--server 127.0.0.1:25565] [--whitelist-file ids.txt]
            [--max-peers N] [--max-connections N]
            [--world ./world] [--sync-interval 300] [--rcon-address ADDR] [--rcon-password PASS]
 mcrtc join [--listen 127.0.0.1:25565] [--identity friend.pem] [--sync-path ./host-world]
+mcrtc update [--check]                   Install the newest GitHub release
 
 Common: --edition java|bedrock, --config mcrtc.toml, --stun <url> (repeatable),
         --turn <url> --turn-user <u> --turn-pass <p>, --raw-json, -v
@@ -141,6 +142,16 @@ Common: --edition java|bedrock, --config mcrtc.toml, --stun <url> (repeatable),
 `--raw-json` prints plain JSON instead of the `mcrtc1:` string. Either form is accepted when
 pasting; end a JSON paste with a blank line. See [mcrtc.example.toml](mcrtc.example.toml) for the
 config file. Flags win over the file.
+
+## Updating
+
+When the interface opens, it asks GitHub for the newest release. If one is newer, an **Update to
+x.y.z** button appears under the title menu. It downloads the binary for your platform, checks it
+against the release's `SHA256SUMS`, and replaces the running file; **Restart to Update** then
+reopens mcrtc as the new version. In a terminal, `mcrtc update` does the same and
+`mcrtc update --check` only reports. Set `check_updates = false` in the config file to stop the
+interface from asking. The folder holding mcrtc must be writable; the Android app is not updated
+this way.
 
 `--server` and `--listen` default to port 25565 for Java and 19132 for Bedrock. In the interface,
 `server` and `listen` from a config file belong to the edition it starts on, which is the file's
@@ -325,7 +336,8 @@ cargo test
 ```
 
 GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)) tests every push
-and builds Windows, macOS and Linux binaries. Pushing a `v*` tag attaches them to a release.
+and builds Windows, macOS and Linux binaries. Pushing a `v*` tag attaches them to a release with a
+`SHA256SUMS` file, which `mcrtc update` needs, so the tag must match the `Cargo.toml` version.
 
 To cross-compile yourself, use native builds or [`cross`](https://github.com/cross-rs/cross) for
 Linux, and [`cargo-xwin`](https://github.com/rust-cross/cargo-xwin) for Windows, since the crypto

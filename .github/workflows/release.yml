@@ -90,6 +90,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # `mcrtc update` refuses a binary that does not match its line here.
+      - name: Checksum the files
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

@@ -15,6 +15,7 @@
 # rcon_address = "127.0.0.1:25575"  # host: defaults to the server's server.properties
 # rcon_password = "secret"
 # sync_path = "./host-world"   # join: keep a copy of the host's world here
+# check_updates = true         # interface: look for a newer GitHub release on opening
 
 # [[turn]]
 # url = "turn:turn.example.com:3478?transport=udp"

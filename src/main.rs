@@ -18,6 +18,7 @@ mod loopback_tests;
 mod peer;
 mod sync;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -93,6 +94,12 @@ enum Command {
     },
     /// Open the graphical interface
     Ui,
+    /// Replace this binary with the newest GitHub release
+    Update {
+        /// Only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
+    },
     /// Connect to a friend's server
     Join {
         /// Local address Minecraft connects to [default: 127.0.0.1:25565, Bedrock 127.0.0.1:19132]
@@ -200,6 +207,9 @@ fn sync_options(
 }
 
 fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
+    if let Some(Command::Update { check }) = cli.command {
+        return update::run_command(check);
+    }
     let _entered = runtime.enter();
     let file = match &cli.common.config {
         Some(path) => FileConfig::load(path)?,
@@ -231,6 +241,7 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
                     .as_deref()
                     .map(load_whitelist)
                     .transpose()?,
+                check_updates: file.check_updates.unwrap_or(true),
             };
             ui::run(options, runtime.handle().clone(), spawn_ctrl_c())
         }
@@ -259,6 +270,7 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
             };
             runtime.block_on(host::run(options, Console::from_stdin(), spawn_ctrl_c()))
         }
+        Command::Update { .. } => unreachable!("handled before the config is read"),
         Command::Join {
             listen,
             identity,

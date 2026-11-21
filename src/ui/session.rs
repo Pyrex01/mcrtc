@@ -34,6 +34,8 @@ pub struct UiOptions {
     /// From the config file. The window's folder fields override the folders.
     pub sync: Option<SyncOptions>,
     pub sync_path: Option<PathBuf>,
+    /// Look for a newer release on GitHub when the window opens.
+    pub check_updates: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,19 @@ impl Sessions {
             session: Arc::default(),
         };
         (sessions, events)
+    }
+
+    /// Runs blocking work off the window's thread, waking the window once it is done.
+    pub fn background(&self, job: impl FnOnce() + Send + 'static) {
+        let wake = self.wake.clone();
+        self.runtime.spawn_blocking(move || {
+            job();
+            wake();
+        });
+    }
+
+    pub fn check_updates(&self) -> bool {
+        self.options.check_updates
     }
 
     pub fn first_edition(&self) -> Edition {

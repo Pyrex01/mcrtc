@@ -31,6 +31,7 @@ fn options(server: String, listen: String) -> UiOptions {
         whitelist: None,
         sync: None,
         sync_path: None,
+        check_updates: false,
     }
 }
 
@@ -190,6 +191,28 @@ fn the_title_screen_leads_everywhere_and_back() {
     assert_eq!(state(&window).screen, Screen::JoinSetup);
     click(&mut window, "Cancel");
     assert_eq!(state(&window).screen, Screen::Title);
+}
+
+#[test]
+fn the_title_screen_offers_an_update_only_once_one_is_found() {
+    let runtime = Runtime::new().unwrap();
+    let mut window = window(&runtime);
+    assert!(window.query_by_label_contains("Update").is_none());
+
+    let release = crate::update::Release::fake(semver::Version::new(9, 0, 0));
+    window.state_mut().as_mut().unwrap().updates = Updates::with(Status::Available(release));
+    window.run_steps(2);
+    assert!(window.query_by_label("Update to 9.0.0").is_some());
+
+    let installed = Status::Installed {
+        version: semver::Version::new(9, 0, 0),
+        exe: PathBuf::from("mcrtc"),
+    };
+    window.state_mut().as_mut().unwrap().updates = Updates::with(installed);
+    window.run_steps(2);
+    click(&mut window, "Restart to Update");
+    let app = window.state().as_ref().unwrap();
+    assert_eq!(app.restart.get(), Some(&PathBuf::from("mcrtc")));
 }
 
 #[test]

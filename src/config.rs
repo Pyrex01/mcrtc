@@ -72,6 +72,8 @@ pub struct FileConfig {
     pub rcon_address: Option<String>,
     pub rcon_password: Option<String>,
     pub sync_path: Option<PathBuf>,
+    /// Whether the interface looks for a newer release when it opens [default: true]
+    pub check_updates: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

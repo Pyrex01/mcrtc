@@ -1,6 +1,6 @@
 [package]
 name = "mcrtc"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]
@@ -27,6 +27,10 @@ toml = "1.2.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 webrtc = "0.21.1"
+ureq = "3.5.2"
+self-replace = "1.5.1"
+sha2 = "0.11.1"
+semver = "1.0.28"
 
 
 # The crypto stack dominates loopback test time, so optimize dependencies even in dev builds.
