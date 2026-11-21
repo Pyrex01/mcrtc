@@ -310,6 +310,12 @@ The log line `connected via ... (relayed through TURN)` confirms it is in use.
 | Paste is cut off in a macOS terminal | macOS limits terminal lines to 1024 characters. Use the interface. |
 | `could not open a window` | The interface needs a desktop session with OpenGL 2 or newer. Over SSH or on a server, use `mcrtc host` and `mcrtc join`, which work without one. |
 | You want more detail | Add `-v`. Logs at this level include full SDPs, so they contain IP addresses. Do not post them publicly. |
+| Windows: the prompt comes back while `mcrtc host` or `mcrtc join` is still running | Release builds are GUI programs so the interface opens without a terminal, and shells do not wait for those. Run `start /b /wait mcrtc host` in cmd, or `mcrtc host \| Out-Default` in PowerShell. |
+
+Every run also writes its log to `mcrtc.log`: in `%LOCALAPPDATA%\mcrtc\logs` on Windows,
+`~/Library/Logs/mcrtc` on macOS and `~/.local/state/mcrtc` on Linux (set `MCRTC_LOG_DIR` to change
+it). Once it reaches 10 MB it is renamed to `mcrtc.log.1`, deleting the previous one, and a new
+`mcrtc.log` starts, so the logs never take more than about 20 MB.
 
 ## Building
 

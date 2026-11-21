@@ -1,6 +1,6 @@
 [package]
 name = "mcrtc"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
@@ -43,3 +43,6 @@ egui_kittest = "0.37"
 # See vendor/rtc-sctp/MCRTC-PATCH.md: keeps retransmitting through outages instead of stalling.
 [patch.crates-io]
 rtc-sctp = { path = "vendor/rtc-sctp" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

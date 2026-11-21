@@ -1,3 +1,7 @@
+// Release builds on Windows are GUI programs, so double-clicking mcrtc opens only its window and
+// no terminal beside it. The command-line modes attach to a console in `attach_console`.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod bridge;
 mod config;
 mod console;
@@ -8,6 +12,7 @@ mod events;
 mod host;
 mod invite;
 mod join;
+mod logfile;
 #[cfg(test)]
 mod loopback_tests;
 mod peer;
@@ -21,7 +26,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tokio::runtime::Runtime;
 use tokio::sync::watch;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, EnvFilter, Layer};
 
 use config::{load_whitelist, CommonArgs, FileConfig, IceConfig};
 use console::Console;
@@ -101,6 +109,11 @@ enum Command {
     },
 }
 
+/// Fatal errors are printed plainly, so the file is the only log they go to.
+const EXIT_TARGET: &str = "mcrtc::exit";
+
+/// Logs go to stderr and to a size-rotated file, so problems in the interface, which has no
+/// terminal to print to, can still be looked at afterwards.
 fn init_logging(verbose: u8) {
     let default = match verbose {
         // The libraries are chatty about expected things, like probes arriving before the reply
@@ -110,11 +123,50 @@ fn init_logging(verbose: u8) {
         _ => "info,mcrtc=trace",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+    let (file, file_error) = match logfile::default_dir()
+        .map(|dir| logfile::RotatingFile::open(&dir, logfile::MAX_BYTES))
+    {
+        Some(Ok(file)) => (Some(file), None),
+        Some(Err(error)) => (None, Some(error.to_string())),
+        None => (None, Some("no home or app data folder".to_owned())),
+    };
+    let path = file.as_ref().map(logfile::RotatingFile::path);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(filter_fn(|meta| meta.target() != EXIT_TARGET)),
+        )
+        .with(file.map(|file| fmt::layer().with_ansi(false).with_writer(file)))
         .init();
+    match (path, file_error) {
+        (Some(path), _) => tracing::debug!("logging to {}", path.display()),
+        (None, Some(error)) => tracing::warn!("not writing a log file: {error}"),
+        (None, None) => {}
+    }
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("{info}");
+        default_hook(info);
+    }));
 }
+
+/// A Windows GUI program starts without a console, so the command-line modes borrow the one they
+/// were started from, or open their own when started some other way.
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AllocConsole, AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: both only change which console this process is attached to.
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            AllocConsole();
+        }
+    }
+}
+
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn attach_console() {}
 
 /// The first Ctrl+C shuts down cleanly, the second gives up on that.
 fn spawn_ctrl_c() -> watch::Receiver<bool> {
@@ -231,7 +283,13 @@ fn run(cli: Cli, runtime: &Runtime) -> Result<()> {
 // Not `#[tokio::main]`: some platforms only allow windows on the main thread, so the interface
 // needs that thread to itself while the runtime works on its own.
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|error| {
+        attach_console();
+        error.exit()
+    });
+    if !matches!(cli.command, None | Some(Command::Ui)) {
+        attach_console();
+    }
     init_logging(cli.common.verbose);
     let result = Runtime::new()
         .map_err(anyhow::Error::from)
@@ -239,6 +297,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            tracing::error!(target: EXIT_TARGET, "{error:#}");
             eprintln!("error: {error:#}");
             ExitCode::FAILURE
         }

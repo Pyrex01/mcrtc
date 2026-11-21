@@ -22,6 +22,7 @@ impl Process {
     fn spawn(args: &[&str]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_mcrtc"))
             .args(args)
+            .env("MCRTC_LOG_DIR", std::env::temp_dir().join("mcrtc-cli-logs"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -461,6 +462,7 @@ fn the_interface_explains_itself_without_a_display() {
     let config = no_stun_config("no-display");
     let output = Command::new(env!("CARGO_BIN_EXE_mcrtc"))
         .args(["ui", "--config", config.to_str().unwrap()])
+        .env("MCRTC_LOG_DIR", std::env::temp_dir().join("mcrtc-cli-logs"))
         .env_remove("DISPLAY")
         .env_remove("WAYLAND_DISPLAY")
         .stdin(Stdio::null())
